@@ -19,6 +19,10 @@ pub use clock::ManualClock;
 pub use clock::{Clock, Moment, Monotonic};
 pub use lane::{Lane, PerLane, Single};
 pub use options::{LaneOptions, Malformed, Options};
+pub use policy::{
+  DEFAULT_MAX_WAIT, DEFAULT_PASS_LIMIT, DefaultPolicy, Elapsed, FirstOf, LaneView, PassLimit,
+  Policy, Stamps, Strict,
+};
 
 /// `#[derive(Lane)]` for a fieldless enum: the lanes in declaration order, index 0 first.
 ///
@@ -56,6 +60,10 @@ pub use fairlane_derive::Lane;
 mod clock;
 mod lane;
 mod options;
+mod policy;
+
+#[cfg(test)]
+mod testing;
 
 /// Paths the derive's output names. Not public API.
 #[doc(hidden)]

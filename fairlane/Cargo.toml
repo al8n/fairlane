@@ -19,6 +19,8 @@ derive = ["dep:fairlane-derive"]
 # `Serialize` and `Deserialize` for `LaneOptions`, `Options` and `PerLane`: a map keyed by
 # `Lane::as_str`, every lane required.
 serde = ["dep:serde_core"]
+# `Policy` for `either::Either`: one policy of two, chosen at run time.
+either = ["dep:either"]
 # `ManualClock`, a clock a test sets.
 test-util = []
 
@@ -28,6 +30,7 @@ hybrid-array = "0.4"
 # `const-generics` gives `typenum::U<N>`, which the derive's output names.
 typenum = { version = "1", features = ["const-generics"] }
 
+either = { version = "1", optional = true, default-features = false }
 serde_core = { version = "1", optional = true, default-features = false }
 
 [dev-dependencies]
