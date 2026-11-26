@@ -11,7 +11,6 @@
 #![cfg_attr(docsrs, allow(unused_attributes))]
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
-#![cfg_attr(not(test), allow(dead_code))]
 
 #[cfg(all(loom, not(feature = "loom")))]
 compile_error!("`--cfg loom` builds fairlane on loom, which needs fairlane's `loom` feature");
