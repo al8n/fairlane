@@ -17,7 +17,8 @@ pub(crate) fn lane(input: &DeriveInput) -> syn::Result<TokenStream> {
   let mut errors = Errors::default();
   let krate = container(&input.attrs, &mut errors);
 
-  if !input.generics.params.is_empty() || input.generics.where_clause.is_some() {
+  // A where clause alone names no parameter: it goes onto the impl as written.
+  if !input.generics.params.is_empty() {
     errors.push(syn::Error::new_spanned(
       &input.generics,
       "`Lane` cannot be derived for an enum with generic parameters",
@@ -56,6 +57,7 @@ pub(crate) fn lane(input: &DeriveInput) -> syn::Result<TokenStream> {
   errors.finish()?;
 
   let ident = &input.ident;
+  let where_clause = &input.generics.where_clause;
   let krate = krate.unwrap_or_else(|| syn::parse_quote!(::fairlane));
   let count = Literal::usize_unsuffixed(lanes.len());
   let indices: Vec<Literal> = (0..lanes.len()).map(Literal::usize_unsuffixed).collect();
@@ -76,7 +78,7 @@ pub(crate) fn lane(input: &DeriveInput) -> syn::Result<TokenStream> {
 
   Ok(quote! {
     #[automatically_derived]
-    impl #krate::Lane for #ident {
+    impl #krate::Lane for #ident #where_clause {
       type N = #krate::__private::typenum::U<#count>;
 
       #[inline]

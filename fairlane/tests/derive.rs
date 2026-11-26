@@ -21,6 +21,15 @@ enum Band {
   Two,
 }
 
+/// A where clause with no generic parameter is kept on the impl.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Lane)]
+enum Bounded
+where
+  u8: Copy,
+{
+  Only,
+}
+
 #[test]
 fn derived_lanes_round_trip() {
   let lanes = [Urgency::Wake, Urgency::Interactive, Urgency::BatchJob];
@@ -35,6 +44,7 @@ fn derived_lanes_round_trip() {
   assert!(!Urgency::Interactive.is_express());
   assert_eq!(Band::Two.index(), 1);
   assert_eq!(Band::from_index(1), Some(Band::Two));
+  assert_eq!(Bounded::from_index(0), Some(Bounded::Only));
 }
 
 #[test]

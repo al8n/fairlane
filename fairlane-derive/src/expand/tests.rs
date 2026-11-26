@@ -86,6 +86,15 @@ fn refuses_generics() {
 }
 
 #[test]
+fn keeps_a_where_clause_without_parameters() {
+  let out = expansion(parse_quote! { enum Urgency where u8: Copy { One } });
+  assert!(
+    out.contains(":: fairlane :: Lane for Urgency where u8 : Copy"),
+    "{out}"
+  );
+}
+
+#[test]
 fn refuses_an_empty_enum() {
   let message = refusal(parse_quote! { enum Urgency {} });
   assert!(
