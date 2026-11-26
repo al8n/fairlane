@@ -71,6 +71,7 @@ pub use fairlane_derive::Lane;
 pub mod choice;
 
 mod arrivals;
+mod channel;
 mod clock;
 mod error;
 mod lane;
