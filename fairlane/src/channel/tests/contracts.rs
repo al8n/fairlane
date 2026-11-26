@@ -214,3 +214,115 @@ fn a_waker_that_panics_costs_a_batch_no_item() {
     "the grant stands"
   );
 }
+
+/// What a re-entrant policy does inside `owed`.
+#[derive(Debug, Clone, Copy)]
+enum Call {
+  Nothing,
+  Receive,
+  WaitForRoom,
+}
+
+/// A policy that calls back into its own channel from `owed`, through handles it is given.
+struct Reentrant {
+  call: std::sync::Mutex<Call>,
+  rx: std::sync::Mutex<Option<Receiver<u32, Three, Reentrant>>>,
+  tx: std::sync::Mutex<Option<Sender<u32, Three, Reentrant>>>,
+}
+
+impl Policy<Three> for Reentrant {
+  type Stamp = ();
+
+  fn stamp(&self) {}
+
+  fn owed(&self, _: &LaneView<Three, ()>) -> Option<Three> {
+    let call = *self.call.lock().unwrap();
+    match call {
+      Call::Nothing => {}
+      Call::Receive => {
+        let rx = self.rx.lock().unwrap().clone().unwrap();
+        let _ = rx.try_recv();
+      }
+      Call::WaitForRoom => {
+        let tx = self.tx.lock().unwrap().clone().unwrap();
+        let _ = tx.send_blocking(Three::C, 9);
+      }
+    }
+    None
+  }
+}
+
+/// A channel whose policy holds its own handles, with lanes B and C full: two lanes in view, so
+/// every receive asks the policy.
+fn reentrant(
+  call: Call,
+) -> (
+  Sender<u32, Three, Reentrant>,
+  Receiver<u32, Three, Reentrant>,
+) {
+  let options = Options::from_fn(|_| LaneOptions::new(cap(1)));
+  let policy = Reentrant {
+    call: std::sync::Mutex::new(Call::Nothing),
+    rx: std::sync::Mutex::new(None),
+    tx: std::sync::Mutex::new(None),
+  };
+  let (tx, rx) = channel_with(options, policy).unwrap();
+  *rx.policy().rx.lock().unwrap() = Some(rx.clone());
+  *tx.policy().tx.lock().unwrap() = Some(tx.clone());
+  tx.try_send(Three::B, 1).unwrap();
+  tx.try_send(Three::C, 2).unwrap();
+  *tx.policy().call.lock().unwrap() = call;
+  (tx, rx)
+}
+
+/// The policy's own handles go, so that the channel is not kept alive by itself.
+fn release(tx: &Sender<u32, Three, Reentrant>) {
+  tx.policy().rx.lock().unwrap().take();
+  tx.policy().tx.lock().unwrap().take();
+}
+
+fn message(payload: Box<dyn core::any::Any + Send>) -> String {
+  payload
+    .downcast::<String>()
+    .map(|message| *message)
+    .unwrap_or_default()
+}
+
+/// A policy that receives from its own channel inside a choice is refused by name. The receive
+/// unwinds with nothing lost, and the same thread receives again afterwards: the marker went with
+/// the unwind.
+#[test]
+fn a_policy_that_receives_from_its_channel_is_refused() {
+  let (tx, rx) = reentrant(Call::Receive);
+  let refused = catch_unwind(AssertUnwindSafe(|| rx.try_recv())).unwrap_err();
+  assert!(message(refused).contains("received on the channel it serves"));
+  *tx.policy().call.lock().unwrap() = Call::Nothing;
+  let snapshot = tx.snapshot();
+  assert_eq!(
+    (snapshot.queued(Three::B), snapshot.queued(Three::C)),
+    (1, 1)
+  );
+  assert_eq!(rx.try_recv().unwrap().unwrap().lane(), Three::B);
+  release(&tx);
+}
+
+/// A policy that waits for room in its own channel, inside a choice, is refused by name instead of
+/// parking for ever, and the receive unwinds with no room lost.
+#[test]
+fn a_policy_that_waits_for_room_in_its_channel_is_refused() {
+  let (tx, rx) = reentrant(Call::WaitForRoom);
+  let refused = catch_unwind(AssertUnwindSafe(|| rx.try_recv())).unwrap_err();
+  assert!(message(refused).contains("waited for room on the channel it serves"));
+  *tx.policy().call.lock().unwrap() = Call::Nothing;
+  let snapshot = tx.snapshot();
+  assert_eq!(
+    (
+      snapshot.queued(Three::C),
+      snapshot.remaining(Three::C),
+      snapshot.senders_waiting(Three::C)
+    ),
+    (1, 0, 0)
+  );
+  assert_eq!(rx.try_recv().unwrap().unwrap().lane(), Three::B);
+  release(&tx);
+}

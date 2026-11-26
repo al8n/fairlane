@@ -26,8 +26,13 @@ pub const DEFAULT_MAX_WAIT: Duration = Duration::from_secs(2);
 /// # Contract
 ///
 /// `stamp` and `owed` are pure and never panic. The receiving side calls them while it holds the
-/// channel's choice lock, so they must not block either. A policy reads its view and nothing else:
-/// it has no way back into the channel.
+/// channel's choice lock, so they must not block, and must not call back into the channel they
+/// serve, from this thread or any other: a receive of that channel would wait for that lock, and
+/// a reserve that must wait would wait for a receive. On this thread such a call is refused by
+/// name, with a panic; a send that does not wait is not checked, and is as forbidden.
+///
+/// A policy that breaks this contract by panicking loses no item and no room: the receive unwinds,
+/// and what it had taken is the caller's.
 ///
 /// The lanes of one view are read at different instants, one after another, so a view is not one
 /// atomic reading of the channel.

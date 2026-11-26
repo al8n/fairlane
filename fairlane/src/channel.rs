@@ -16,6 +16,7 @@ use crate::{
   options::{LaneOptions, Malformed, Options},
   policy::{DefaultPolicy, Policy},
   receiver::Receiver,
+  reentry,
   remaining::{Remaining, free},
   reserves::Reserves,
   ring::Ring,
@@ -208,6 +209,12 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   #[inline]
   pub(crate) fn lane_at(&self, index: usize) -> &LaneState<T, Y::Stamp> {
     self.lanes.at(index)
+  }
+
+  /// The channel's address: the name the re-entry marker knows it by.
+  #[inline]
+  pub(crate) fn address(&self) -> usize {
+    core::ptr::from_ref(self).addr()
   }
 
   /// The lane at `index`, as read at the construction.
@@ -404,6 +411,9 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     self.shut(&mut wakers);
     let mut ahead = Vec::new();
     if let Some(choice) = &self.choice {
+      // A receive in progress holds a `Receiver`, so no policy can drop the last one from inside
+      // a choice of this channel; the refusal stands guard all the same.
+      reentry::refuse(self.address(), "dropped the last receiver");
       let mut choice = lock(choice);
       for (index, slot) in choice.ahead.iter_mut().enumerate() {
         if let Some(popped) = slot.take() {

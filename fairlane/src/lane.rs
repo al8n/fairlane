@@ -17,8 +17,11 @@ use typenum::Unsigned;
 ///   different indices;
 /// - [`from_index`](Lane::from_index) is `Some(lane)` with `lane.index() == i` for every `i`
 ///   below `N`, and `None` from `N` on;
-/// - every method is pure and never panics. The receiving side calls them while it holds the
-///   channel's choice lock.
+/// - every method is pure and never panics. A policy may call them while the channel's choice
+///   lock is held, and the [`Policy`](crate::Policy) contract applies to them there.
+///
+/// A door resolves its lane's index once, so a `Lane` that breaks the contract can make the
+/// channel answer wrongly, but cannot make it write to a lane it holds no room in.
 ///
 /// [`channel`](crate::channel) checks the round trip and refuses a vocabulary that breaks it with
 /// [`Malformed::Indices`](crate::Malformed::Indices).

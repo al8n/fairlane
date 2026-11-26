@@ -238,7 +238,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     let state = self.lane_at(index);
     state
       .reserves
-      .poll(&state.remaining, wait, cx.waker(), spare)
+      .poll(&state.remaining, wait, cx.waker(), spare, self.address())
   }
 
   /// A reserve dropped: one that waits leaves the line, passing on a grant it holds.

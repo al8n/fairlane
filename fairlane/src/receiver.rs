@@ -16,6 +16,7 @@ use crate::{
   park::park_on,
   policy::{DefaultPolicy, LaneView, Policy},
   quota::Quota,
+  reentry::{self, Choosing},
   snapshot::Snapshot,
   sync::{Arc, Mutex, Ordering, lock},
   waiters::Key,
@@ -179,12 +180,15 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     sink: &mut impl FnMut(Received<T, L>),
   ) -> Took {
     let count = lane_count::<L>();
-    // Declared before the guard, so that it is dropped after it.
+    // Declared first, so that it is dropped last: unlocked and unmarked.
     let mut back = RoomBack {
       shared: self,
       units: PerLane::filled(0),
     };
+    reentry::refuse(self.address(), "received");
     let mut guard = lock(choice);
+    // Dropped first, on every exit, an unwind out of the policy included.
+    let _choosing = Choosing::enter(self.address());
     let choice = &mut *guard;
     let stamps_matter = core::mem::size_of::<Y::Stamp>() != 0;
     let mut now: Option<Y::Stamp> = None;

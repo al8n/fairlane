@@ -23,6 +23,7 @@ use core::{
 
 use crate::{
   error::Closed,
+  reentry,
   remaining::{Back, CLOSED, Join, Refusal, Remaining, back, closed, join, left},
   sync::{AtomicUsize, Mutex, Ordering, lock},
   waiters::{Key, State, Waiters},
@@ -57,20 +58,26 @@ impl Reserves {
     self.parked.load(Ordering::SeqCst)
   }
 
-  /// Polls the reserve at `wait` to its verdict. Wakers it no longer needs go to `spare`, for the
-  /// caller to drop once it owns the verdict.
+  /// Polls the reserve at `wait`, of the channel at `channel`, to its verdict. Wakers it no longer
+  /// needs go to `spare`, for the caller to drop once it owns the verdict.
   pub(crate) fn poll(
     &self,
     remaining: &Remaining,
     wait: &mut Wait,
     waker: &Waker,
     spare: &mut Spare,
+    channel: usize,
   ) -> Poll<Result<(), Closed>> {
     match wait {
       Wait::Start => match remaining.try_take() {
         Ok(()) => done(wait, Ok(())),
         Err(Refusal::Closed) => done(wait, Err(Closed)),
-        Err(Refusal::Busy) => self.begin(remaining, wait, waker.clone(), spare),
+        Err(Refusal::Busy) => {
+          // A reserve that must wait, inside its own channel's choice, would wait for a receive
+          // that can never come. Only this slow path pays for the check.
+          reentry::refuse(channel, "waited for room");
+          self.begin(remaining, wait, waker.clone(), spare)
+        }
       },
       Wait::Waiting(_) => self.again(wait, waker, spare),
       // Polled after it resolved: the future's contract leaves this open, and it never wakes.

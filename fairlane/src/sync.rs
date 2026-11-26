@@ -13,6 +13,13 @@ pub(crate) use loom::sync::{
   atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 
+/// Thread-locals: loom's under loom, which keeps one per modelled thread where std's would be
+/// shared by every thread a model runs on one OS thread.
+#[cfg(loom)]
+pub(crate) use loom::thread_local;
+#[cfg(not(loom))]
+pub(crate) use std::thread_local;
+
 /// Locks `mutex`, reading through a poison: every critical section of the crate leaves its state
 /// whole before it can panic, so the state behind a poisoned lock is sound.
 #[inline]
