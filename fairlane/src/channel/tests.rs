@@ -281,3 +281,6 @@ fn shared_state_holds_no_item_inline() {
 }
 
 mod differential;
+#[cfg(feature = "test-util")]
+mod differential_lanes;
+mod lanes;

@@ -3,6 +3,7 @@
 //! `RUSTFLAGS="--cfg loom" cargo test -p fairlane --features loom --release --lib models`.
 
 mod channel;
+mod lanes;
 mod ring;
 
 /// Checks `f` under loom. The preemption bound is `LOOM_MAX_PREEMPTIONS` where it is set, else 3.
