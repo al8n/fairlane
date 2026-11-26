@@ -134,13 +134,15 @@ fn ring_holds_zero_sized_items() {
 #[test]
 fn ring_refuses_what_cannot_be_held() {
   assert!(Ring::<u8, ()>::new(usize::MAX, false).is_none());
-  assert!(Ring::<[u8; 1 << 20], ()>::new(1 << 50, false).is_none());
-  assert!(Ring::<u8, [u8; 1 << 20]>::new(1 << 50, true).is_none());
+  assert!(Ring::<[u8; 1 << 20], ()>::new(usize::MAX >> 4, false).is_none());
+  assert!(Ring::<u8, [u8; 1 << 20]>::new(usize::MAX >> 4, true).is_none());
 }
 
 /// 2^50 cells of 16 bytes: a layout that fits `isize`, and an allocation no system gives. Not
-/// under miri, which stops at an allocation it cannot make instead of failing it.
+/// under miri, which stops at an allocation it cannot make instead of failing it; and only where
+/// `usize` holds 2^50.
 #[test]
+#[cfg(target_pointer_width = "64")]
 #[cfg_attr(miri, ignore)]
 fn ring_refuses_an_allocation_the_system_cannot_give() {
   assert!(Ring::<u8, ()>::new(1 << 50, false).is_none());

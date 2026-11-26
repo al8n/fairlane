@@ -263,7 +263,7 @@ fn a_capacity_that_cannot_be_held_is_refused() {
     Malformed::Capacity(0)
   );
   assert_eq!(
-    bounded::<[u8; 1 << 20]>(cap(1 << 50)).unwrap_err(),
+    bounded::<[u8; 1 << 20]>(cap(usize::MAX >> 4)).unwrap_err(),
     Malformed::Capacity(0)
   );
 }

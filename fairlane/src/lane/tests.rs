@@ -108,7 +108,10 @@ fn per_lane_iter_skips_what_a_broken_lane_cannot_name() {
   assert_eq!(table.iter().count(), 1);
 }
 
-#[cfg(feature = "serde")]
+/// Not under miri: they reach no `unsafe` of this crate, and serde_json's own error path trips
+/// miri's symbolic alignment check on some targets, which miri itself calls a possible false
+/// positive.
+#[cfg(all(feature = "serde", not(miri)))]
 mod serde_tests {
   use super::*;
 
