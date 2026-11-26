@@ -20,6 +20,56 @@ use crate::{
   sync::{Arc, AtomicBool, AtomicUsize, Mutex, Ordering, lock},
 };
 
+/// A channel of several lanes, with the default policy: a count and a time, whichever comes first
+/// ([`DefaultPolicy`]).
+///
+/// # Errors
+///
+/// [`Malformed`], by name: no lane; a [`Lane`] whose indices do not round-trip; an express lane
+/// behind one that is not; a capacity that cannot be held as a ring.
+///
+/// ```
+/// use core::num::NonZeroUsize;
+///
+/// use fairlane::{Lane, LaneOptions, Options};
+///
+/// # #[cfg(feature = "derive")] {
+/// #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Lane)]
+/// enum Urgency {
+///   Interactive,
+///   Batch,
+/// }
+///
+/// let options = Options::from_fn(|lane| match lane {
+///   Urgency::Interactive => LaneOptions::new(NonZeroUsize::new(64).unwrap()),
+///   Urgency::Batch => LaneOptions::new(NonZeroUsize::new(1024).unwrap()),
+/// });
+/// let (tx, rx) = fairlane::channel::<&str, Urgency>(options)?;
+/// tx.send_blocking(Urgency::Batch, "later")?;
+/// tx.send_blocking(Urgency::Interactive, "now")?;
+/// assert_eq!(rx.recv_blocking()?.into_item(), "now");
+/// assert_eq!(rx.recv_blocking()?.into_item(), "later");
+/// # }
+/// # Ok::<(), Box<dyn core::error::Error>>(())
+/// ```
+pub fn channel<T, L: Lane>(
+  options: Options<L>,
+) -> Result<Halves<T, L, DefaultPolicy<L>>, Malformed> {
+  pair(&options, DefaultPolicy::default())
+}
+
+/// A channel of several lanes, with `policy` against starvation.
+///
+/// # Errors
+///
+/// As [`channel`].
+pub fn channel_with<T, L: Lane, Y: Policy<L>>(
+  options: Options<L>,
+  policy: Y,
+) -> Result<Halves<T, L, Y>, Malformed> {
+  pair(&options, policy)
+}
+
 /// A bounded channel of one lane, with the default policy, which a channel of one lane never
 /// consults.
 ///
