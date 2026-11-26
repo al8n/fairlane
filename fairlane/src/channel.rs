@@ -1,21 +1,58 @@
 //! What the two halves share, and the constructors.
 
-use core::panic::AssertUnwindSafe;
+use core::{num::NonZeroUsize, panic::AssertUnwindSafe};
 
 use event_listener::Event;
 use hybrid_array::Array;
 
 use crate::{
   arrivals::Arrivals,
-  lane::{Lane, PerLane, lane_count},
-  options::{Malformed, Options},
-  policy::Policy,
+  lane::{Lane, PerLane, Single, lane_count},
+  options::{LaneOptions, Malformed, Options},
+  policy::{DefaultPolicy, Policy},
+  receiver::Receiver,
   remaining::{Remaining, free},
   reserves::Reserves,
   ring::Ring,
+  sender::Sender,
   snapshot::{Reading, Snapshot},
   sync::{Arc, AtomicBool, AtomicUsize, Ordering},
 };
+
+/// A bounded channel of one lane, with the default policy, which a channel of one lane never
+/// consults.
+///
+/// # Errors
+///
+/// [`Malformed::Capacity`] where `capacity` cannot be held as a ring: its power of two, or the
+/// ring's cells, do not fit the address space.
+///
+/// ```
+/// use core::num::NonZeroUsize;
+///
+/// use fairlane::{Closed, Single};
+///
+/// let (tx, rx) = fairlane::bounded::<u32>(NonZeroUsize::new(8).unwrap())?;
+/// tx.send_blocking(Single, 7)?;
+/// assert_eq!(rx.recv_blocking()?.into_item(), 7);
+/// # Ok::<(), Box<dyn core::error::Error>>(())
+/// ```
+pub fn bounded<T>(capacity: NonZeroUsize) -> Result<(Sender<T>, Receiver<T>), Malformed> {
+  let options = Options::<Single>::from_fn(|Single| LaneOptions::new(capacity));
+  pair(&options, DefaultPolicy::default())
+}
+
+/// A channel's two halves.
+pub(crate) type Halves<T, L, Y> = (Sender<T, L, Y>, Receiver<T, L, Y>);
+
+/// Both halves of a new channel.
+pub(crate) fn pair<T, L: Lane, Y: Policy<L>>(
+  options: &Options<L>,
+  policy: Y,
+) -> Result<Halves<T, L, Y>, Malformed> {
+  let shared = Arc::new(Shared::new(options, policy)?);
+  Ok((Sender::new(shared.clone()), Receiver::new(shared)))
+}
 
 /// One lane's whole state.
 pub(crate) struct LaneState<T, S> {
@@ -197,3 +234,6 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     }
   }
 }
+
+#[cfg(test)]
+mod tests;

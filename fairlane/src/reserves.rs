@@ -219,3 +219,6 @@ impl Reserves {
     self.event.notify(usize::MAX);
   }
 }
+
+#[cfg(test)]
+mod tests;

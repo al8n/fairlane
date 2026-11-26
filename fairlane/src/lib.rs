@@ -21,6 +21,7 @@ compile_error!(
   "fairlane needs 64-bit atomics: a ring position, which is an item's ordinal, is an `AtomicU64`"
 );
 
+pub use channel::bounded;
 #[cfg(feature = "test-util")]
 #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
 pub use clock::ManualClock;
