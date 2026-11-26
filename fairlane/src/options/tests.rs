@@ -221,6 +221,26 @@ mod serde_tests {
     assert_eq!(serde_json::from_str::<LaneOptions>(&json).unwrap(), express);
   }
 
+  /// A format that is not self-describing, which reads a struct by position, round-trips every
+  /// presence of `express` and whole options.
+  #[test]
+  fn serde_round_trips_a_binary_format() {
+    let plain = LaneOptions::new(cap(8));
+    for options in [plain, plain.with_express(true), plain.with_express(false)] {
+      let bytes = postcard::to_allocvec(&options).unwrap();
+      assert_eq!(
+        postcard::from_bytes::<LaneOptions>(&bytes).unwrap(),
+        options
+      );
+    }
+    let options = tiers().with_lane(Tier::Batch, LaneOptions::new(cap(9)).with_express(false));
+    let bytes = postcard::to_allocvec(&options).unwrap();
+    assert_eq!(
+      postcard::from_bytes::<Options<Tier>>(&bytes).unwrap(),
+      options
+    );
+  }
+
   #[test]
   fn serde_express_may_be_missing_or_null() {
     let missing: LaneOptions = serde_json::from_str(r#"{"capacity":8}"#).unwrap();

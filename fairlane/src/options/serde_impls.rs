@@ -2,7 +2,7 @@ use core::{fmt, num::NonZeroUsize};
 
 use serde_core::{
   Deserialize, Deserializer, Serialize, Serializer,
-  de::{self, MapAccess, Visitor},
+  de::{self, MapAccess, SeqAccess, Visitor},
   ser::SerializeStruct,
 };
 
@@ -11,21 +11,31 @@ use crate::lane::{Lane, PerLane};
 
 const FIELDS: &[&str] = &["capacity", "express"];
 
+/// A human-readable format writes a map: `capacity`, and `express` only where the options say. A
+/// format that is not self-describing reads a struct by position, so there both fields are always
+/// written, `express` as an explicit option.
 impl Serialize for LaneOptions {
   fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-    let fields = 1 + usize::from(self.express.is_some());
-    let mut state = serializer.serialize_struct("LaneOptions", fields)?;
-    state.serialize_field("capacity", &self.capacity)?;
-    match self.express {
-      Some(express) => state.serialize_field("express", &express)?,
-      None => state.skip_field("express")?,
+    if serializer.is_human_readable() {
+      let fields = 1 + usize::from(self.express.is_some());
+      let mut state = serializer.serialize_struct("LaneOptions", fields)?;
+      state.serialize_field("capacity", &self.capacity)?;
+      match self.express {
+        Some(express) => state.serialize_field("express", &express)?,
+        None => state.skip_field("express")?,
+      }
+      state.end()
+    } else {
+      let mut state = serializer.serialize_struct("LaneOptions", FIELDS.len())?;
+      state.serialize_field("capacity", &self.capacity)?;
+      state.serialize_field("express", &self.express)?;
+      state.end()
     }
-    state.end()
   }
 }
 
 /// `capacity` is required; `express` may be missing or null, and then the lane's declaration
-/// decides. An unknown field is refused.
+/// decides. An unknown field is refused. In a sequence, the fields come in their order.
 impl<'de> Deserialize<'de> for LaneOptions {
   fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
     deserializer.deserialize_struct("LaneOptions", FIELDS, LaneOptionsVisitor)
@@ -39,6 +49,14 @@ impl<'de> Visitor<'de> for LaneOptionsVisitor {
 
   fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.write_str("a lane's options: `capacity`, and optionally `express`")
+  }
+
+  fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<LaneOptions, A::Error> {
+    let capacity = seq
+      .next_element::<NonZeroUsize>()?
+      .ok_or_else(|| de::Error::invalid_length(0, &self))?;
+    let express = seq.next_element::<Option<bool>>()?.flatten();
+    Ok(LaneOptions { capacity, express })
   }
 
   fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<LaneOptions, A::Error> {

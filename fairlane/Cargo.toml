@@ -41,6 +41,8 @@ serde_core = { version = "1", optional = true, default-features = false }
 loom = { version = "0.7", optional = true, features = ["futures"] }
 
 [dev-dependencies]
+# A format that is not self-describing, for the binary form of the serde impls.
+postcard = { version = "1", default-features = false, features = ["alloc"] }
 serde_json = "1"
 trybuild = "1"
 
