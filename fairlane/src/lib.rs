@@ -34,6 +34,7 @@ pub use policy::{
   Policy, Stamps, Strict,
 };
 pub use quota::Quota;
+pub use receiver::{Received, Receiver, Recv, RecvMany, RecvManyError};
 pub use sender::{Reserve, ReserveOwned, Sender, Sending, WhenClosed};
 pub use snapshot::Snapshot;
 
@@ -82,6 +83,7 @@ mod park;
 mod permit;
 mod policy;
 mod quota;
+mod receiver;
 mod remaining;
 mod reserves;
 #[allow(unsafe_code)]
