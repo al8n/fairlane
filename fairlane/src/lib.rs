@@ -82,6 +82,8 @@ mod sync;
 
 #[cfg(test)]
 mod model;
+#[cfg(all(test, loom))]
+mod models;
 #[cfg(test)]
 mod testing;
 
