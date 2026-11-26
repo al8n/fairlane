@@ -2,6 +2,7 @@
 //! cells, within a preemption bound. Run them with
 //! `RUSTFLAGS="--cfg loom" cargo test -p fairlane --features loom --release --lib models`.
 
+mod channel;
 mod ring;
 
 /// Checks `f` under loom. The preemption bound is `LOOM_MAX_PREEMPTIONS` where it is set, else 3.
