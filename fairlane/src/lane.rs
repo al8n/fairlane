@@ -69,16 +69,16 @@ impl Lane for Single {
   }
 }
 
-/// One value for each lane of `P`.
+/// One value for each lane of `L`.
 ///
 /// It is the public shape of every per-lane table, so no `typenum` type appears in a signature
 /// that uses it.
-pub struct PerLane<X, P: Lane> {
-  values: Array<X, P::N>,
-  _lane: PhantomData<P>,
+pub struct PerLane<T, L: Lane> {
+  values: Array<T, L::N>,
+  _lane: PhantomData<L>,
 }
 
-impl<X, P: Lane> PerLane<X, P> {
+impl<T, L: Lane> PerLane<T, L> {
   /// A value for every lane, from `f`.
   ///
   /// The derive's users build one with an exhaustive `match` over the lane, so a lane that was
@@ -88,10 +88,10 @@ impl<X, P: Lane> PerLane<X, P> {
   ///
   /// Only for a hand-written [`Lane`] whose `from_index` is not `Some` for an index below `N`,
   /// which breaks the trait's contract.
-  pub fn from_fn(mut f: impl FnMut(P) -> X) -> Self {
-    Self::from_array(Array::from_fn(|index| match P::from_index(index) {
+  pub fn from_fn(mut f: impl FnMut(L) -> T) -> Self {
+    Self::from_array(Array::from_fn(|index| match L::from_index(index) {
       Some(lane) => f(lane),
-      None => broken_lane::<P>(index),
+      None => broken_lane::<L>(index),
     }))
   }
 
@@ -101,7 +101,7 @@ impl<X, P: Lane> PerLane<X, P> {
   ///
   /// Only for a hand-written [`Lane`] whose `index` is not below `N`.
   #[inline]
-  pub fn get(&self, lane: P) -> &X {
+  pub fn get(&self, lane: L) -> &T {
     &self.values[lane.index()]
   }
 
@@ -111,95 +111,95 @@ impl<X, P: Lane> PerLane<X, P> {
   ///
   /// As [`get`](Self::get).
   #[inline]
-  pub fn get_mut(&mut self, lane: P) -> &mut X {
+  pub fn get_mut(&mut self, lane: L) -> &mut T {
     &mut self.values[lane.index()]
   }
 
   /// Every lane with its value, in the lanes' order.
-  pub fn iter(&self) -> impl Iterator<Item = (P, &X)> + '_ {
+  pub fn iter(&self) -> impl Iterator<Item = (L, &T)> + '_ {
     self
       .values
       .iter()
       .enumerate()
-      .filter_map(|(index, value)| P::from_index(index).map(|lane| (lane, value)))
+      .filter_map(|(index, value)| L::from_index(index).map(|lane| (lane, value)))
   }
 
   #[inline]
-  pub(crate) const fn from_array(values: Array<X, P::N>) -> Self {
+  pub(crate) const fn from_array(values: Array<T, L::N>) -> Self {
     Self {
       values,
       _lane: PhantomData,
     }
   }
 
-  /// The same value for every lane, without calling into `P`.
+  /// The same value for every lane, without calling into `L`.
   #[inline]
-  pub(crate) fn filled(value: X) -> Self
+  pub(crate) fn filled(value: T) -> Self
   where
-    X: Clone,
+    T: Clone,
   {
     Self::from_array(Array::from_fn(|_| value.clone()))
   }
 
   /// The values by index.
   #[inline]
-  pub(crate) fn as_slice(&self) -> &[X] {
+  pub(crate) fn as_slice(&self) -> &[T] {
     self.values.as_slice()
   }
 
   /// The value at `index`.
   #[inline]
-  pub(crate) fn at(&self, index: usize) -> &X {
+  pub(crate) fn at(&self, index: usize) -> &T {
     &self.values[index]
   }
 }
 
-/// How many lanes `P` has.
+/// How many lanes `L` has.
 #[inline]
-pub(crate) const fn lane_count<P: Lane>() -> usize {
-  <P::N as Unsigned>::USIZE
+pub(crate) const fn lane_count<L: Lane>() -> usize {
+  <L::N as Unsigned>::USIZE
 }
 
 #[cold]
 #[inline(never)]
-fn broken_lane<P: Lane>(index: usize) -> ! {
+fn broken_lane<L: Lane>(index: usize) -> ! {
   panic!(
     "`{}::from_index({index})` is `None` below its `Lane::N`, which breaks `Lane`'s contract",
-    core::any::type_name::<P>()
+    core::any::type_name::<L>()
   )
 }
 
-impl<X: Clone, P: Lane> Clone for PerLane<X, P> {
+impl<T: Clone, L: Lane> Clone for PerLane<T, L> {
   #[inline]
   fn clone(&self) -> Self {
     Self::from_array(self.values.clone())
   }
 }
 
-impl<X: Default, P: Lane> Default for PerLane<X, P> {
+impl<T: Default, L: Lane> Default for PerLane<T, L> {
   #[inline]
   fn default() -> Self {
     Self::from_array(Array::default())
   }
 }
 
-impl<X: PartialEq, P: Lane> PartialEq for PerLane<X, P> {
+impl<T: PartialEq, L: Lane> PartialEq for PerLane<T, L> {
   #[inline]
   fn eq(&self, other: &Self) -> bool {
     self.values == other.values
   }
 }
 
-impl<X: Eq, P: Lane> Eq for PerLane<X, P> {}
+impl<T: Eq, L: Lane> Eq for PerLane<T, L> {}
 
-impl<X: core::hash::Hash, P: Lane> core::hash::Hash for PerLane<X, P> {
+impl<T: core::hash::Hash, L: Lane> core::hash::Hash for PerLane<T, L> {
   #[inline]
   fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
     self.values.hash(state);
   }
 }
 
-impl<X: fmt::Debug, P: Lane> fmt::Debug for PerLane<X, P> {
+impl<T: fmt::Debug, L: Lane> fmt::Debug for PerLane<T, L> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.debug_map()
       .entries(self.iter().map(|(lane, value)| (lane.as_str(), value)))

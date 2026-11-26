@@ -5,7 +5,7 @@ use crate::lane::Lane;
 
 /// One policy of two, chosen at run time: from a deployment's configuration, for example. Unlike
 /// [`FirstOf`](super::FirstOf), only the chosen side applies.
-impl<P: Lane, A: Policy<P>, B: Policy<P>> Policy<P> for Either<A, B> {
+impl<L: Lane, A: Policy<L>, B: Policy<L>> Policy<L> for Either<A, B> {
   type Stamp = Either<A::Stamp, B::Stamp>;
 
   #[inline]
@@ -18,7 +18,7 @@ impl<P: Lane, A: Policy<P>, B: Policy<P>> Policy<P> for Either<A, B> {
 
   /// A stamp of the other side cannot come from this policy, whose side is fixed for its life; one
   /// would be read as `now`, which is never owed.
-  fn owed(&self, view: &LaneView<P, Self::Stamp>) -> Option<P> {
+  fn owed(&self, view: &LaneView<L, Self::Stamp>) -> Option<L> {
     match self {
       Either::Left(left) => {
         let now = view.now().left().unwrap_or_else(|| left.stamp());

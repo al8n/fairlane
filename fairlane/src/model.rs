@@ -38,9 +38,9 @@ pub(crate) enum Reserved {
 
 /// One item taken out.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Taken<T, P> {
+pub(crate) struct Taken<T, L> {
   pub(crate) item: T,
-  pub(crate) lane: P,
+  pub(crate) lane: L,
   pub(crate) ordinal: u64,
 }
 
@@ -86,7 +86,7 @@ pub(crate) struct Batch {
 }
 
 impl Batch {
-  pub(crate) fn new<P: Lane>(quota: &Quota<P>) -> Self {
+  pub(crate) fn new<L: Lane>(quota: &Quota<L>) -> Self {
     Self {
       held: 0,
       limit: quota.limit(),
@@ -96,26 +96,26 @@ impl Batch {
 
 /// What one choice did.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Choice<T, P> {
-  Took(Taken<T, P>),
-  /// The chosen lane's cap is reached: the batch ends, and nothing else is taken instead.
+pub(crate) enum Choice<T, L> {
+  Took(Taken<T, L>),
+  /// The chosen lane's limit is reached: the batch ends, and nothing else is taken instead.
   Stopped,
   /// No lane the quota admits holds an item.
   Nothing,
 }
 
-pub(crate) struct Model<T, P: Lane, S> {
+pub(crate) struct Model<T, L: Lane, S> {
   lanes: Vec<LaneModel<T, S>>,
   passed_over: Vec<u32>,
   permits: BTreeMap<PermitId, usize>,
   waiters: BTreeMap<WaiterId, Waiter>,
   next_id: u64,
-  _lane: core::marker::PhantomData<P>,
+  _lane: core::marker::PhantomData<L>,
 }
 
-impl<T, P: Lane, S: Copy> Model<T, P, S> {
-  pub(crate) fn new(options: &Options<P>) -> Self {
-    let lanes = (0..lane_count::<P>())
+impl<T, L: Lane, S: Copy> Model<T, L, S> {
+  pub(crate) fn new(options: &Options<L>) -> Self {
+    let lanes = (0..lane_count::<L>())
       .map(|index| LaneModel {
         capacity: options.lane_at(index).capacity().get(),
         express: options.is_express_at(index),
@@ -129,7 +129,7 @@ impl<T, P: Lane, S: Copy> Model<T, P, S> {
       .collect();
     Self {
       lanes,
-      passed_over: vec![0; lane_count::<P>()],
+      passed_over: vec![0; lane_count::<L>()],
       permits: BTreeMap::new(),
       waiters: BTreeMap::new(),
       next_id: 0,
@@ -155,7 +155,7 @@ impl<T, P: Lane, S: Copy> Model<T, P, S> {
   }
 
   /// A reserve that never waits.
-  pub(crate) fn try_reserve(&mut self, lane: P) -> Result<PermitId, TryReserveError> {
+  pub(crate) fn try_reserve(&mut self, lane: L) -> Result<PermitId, TryReserveError> {
     let index = lane.index();
     if self.lanes[index].closed {
       return Err(TryReserveError::Closed);
@@ -167,7 +167,7 @@ impl<T, P: Lane, S: Copy> Model<T, P, S> {
   }
 
   /// A reserve that waits where it must.
-  pub(crate) fn reserve(&mut self, lane: P) -> Reserved {
+  pub(crate) fn reserve(&mut self, lane: L) -> Reserved {
     match self.try_reserve(lane) {
       Ok(permit) => Reserved::Granted(permit),
       Err(TryReserveError::Closed) => Reserved::Closed,
@@ -243,18 +243,18 @@ impl<T, P: Lane, S: Copy> Model<T, P, S> {
   }
 
   /// The lane a permit holds room in.
-  pub(crate) fn permit_lane(&self, permit: PermitId) -> P {
-    P::from_index(self.permits[&permit]).expect("a valid lane")
+  pub(crate) fn permit_lane(&self, permit: PermitId) -> L {
+    L::from_index(self.permits[&permit]).expect("a valid lane")
   }
 
   /// One choice of a batch, for `quota`, read at `now`.
-  pub(crate) fn choose<Y: Policy<P, Stamp = S>>(
+  pub(crate) fn choose<Y: Policy<L, Stamp = S>>(
     &mut self,
-    quota: &Quota<P>,
+    quota: &Quota<L>,
     now: S,
     policy: &Y,
     batch: &mut Batch,
-  ) -> Choice<T, P> {
+  ) -> Choice<T, L> {
     let waiting = |lane: &LaneModel<T, S>| !lane.queue.is_empty();
     let admitted: Vec<usize> = (0..self.lanes.len())
       .filter(|&index| quota.admits_at(index) && waiting(&self.lanes[index]))
@@ -276,7 +276,7 @@ impl<T, P: Lane, S: Copy> Model<T, P, S> {
     let chosen = express.unwrap_or_else(|| {
       let mut view = LaneView::new(now);
       for &index in &others {
-        let lane = P::from_index(index).expect("a valid lane");
+        let lane = L::from_index(index).expect("a valid lane");
         let queue = &self.lanes[index].queue;
         view = view.with_lane(
           lane,
@@ -291,9 +291,8 @@ impl<T, P: Lane, S: Copy> Model<T, P, S> {
       }
     });
 
-    // The batch rule: stop at the cap, never take another lane instead.
-    let cap = quota.at_most_at(chosen);
-    let limit = batch.limit.min(cap);
+    // The batch rule: stop at the chosen lane's limit, never take another lane instead.
+    let limit = batch.limit.min(quota.limit_at(chosen));
     if batch.held >= limit {
       return Choice::Stopped;
     }
@@ -316,18 +315,18 @@ impl<T, P: Lane, S: Copy> Model<T, P, S> {
     self.release(chosen);
     Choice::Took(Taken {
       item,
-      lane: P::from_index(chosen).expect("a valid lane"),
+      lane: L::from_index(chosen).expect("a valid lane"),
       ordinal,
     })
   }
 
   /// A whole batch for `quota` at `now`: choices until one stops or finds nothing.
-  pub(crate) fn recv_many<Y: Policy<P, Stamp = S>>(
+  pub(crate) fn recv_many<Y: Policy<L, Stamp = S>>(
     &mut self,
-    quota: &Quota<P>,
+    quota: &Quota<L>,
     now: S,
     policy: &Y,
-  ) -> Vec<Taken<T, P>> {
+  ) -> Vec<Taken<T, L>> {
     let mut batch = Batch::new(quota);
     let mut taken = Vec::new();
     while let Choice::Took(item) = self.choose(quota, now, policy, &mut batch) {
@@ -337,7 +336,7 @@ impl<T, P: Lane, S: Copy> Model<T, P, S> {
   }
 
   /// Whether every lane `quota` admits is closed and empty.
-  pub(crate) fn ended(&self, quota: &Quota<P>) -> bool {
+  pub(crate) fn ended(&self, quota: &Quota<L>) -> bool {
     (0..self.lanes.len())
       .filter(|&index| quota.admits_at(index))
       .all(|index| self.lanes[index].closed && self.lanes[index].queue.is_empty())
@@ -382,7 +381,7 @@ impl<T, P: Lane, S: Copy> Model<T, P, S> {
     dropped
   }
 
-  pub(crate) fn counts(&self, lane: P) -> LaneCounts {
+  pub(crate) fn counts(&self, lane: L) -> LaneCounts {
     let model = &self.lanes[lane.index()];
     LaneCounts {
       queued: model.queue.len(),

@@ -97,7 +97,7 @@ impl Visitor<'_> for FieldVisitor {
   }
 }
 
-impl<P: Lane> Serialize for Options<P> {
+impl<L: Lane> Serialize for Options<L> {
   #[inline]
   fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
     self.lanes.serialize(serializer)
@@ -106,7 +106,7 @@ impl<P: Lane> Serialize for Options<P> {
 
 /// A map keyed by each lane's [`as_str`](Lane::as_str), every lane required. Whether the options
 /// make a channel is [`channel`](crate::channel)'s to say.
-impl<'de, P: Lane> Deserialize<'de> for Options<P> {
+impl<'de, L: Lane> Deserialize<'de> for Options<L> {
   #[inline]
   fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
     PerLane::deserialize(deserializer).map(|lanes| Self { lanes })

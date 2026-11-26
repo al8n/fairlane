@@ -152,12 +152,14 @@ fn model_x4_stops_at_the_cap() {
   for _ in 0..2 {
     assert_eq!(model.recv_many(&one, (), &policy)[0].lane, Three::A);
   }
-  let quota = Quota::up_to(32).at_most(Three::A, 1).at_most(Three::B, 32);
+  let quota = Quota::up_to(32)
+    .limit_with(Three::A, 1)
+    .limit_with(Three::B, 32);
   let batch = model.recv_many(&quota, (), &policy);
   assert_eq!(
     batch.iter().map(|t| t.lane).collect::<Vec<_>>(),
     [Three::B],
-    "the batch stops at the interactive cap"
+    "the batch stops at the interactive limit"
   );
   let next = model.recv_many(&quota, (), &policy);
   assert_eq!(next.iter().map(|t| t.lane).collect::<Vec<_>>(), [Three::A]);
@@ -347,7 +349,7 @@ fn random_quota(rng: &mut Rng) -> Quota<Three> {
   let mut quota = Quota::up_to(rng.below(5));
   for lane in Three::ALL {
     if rng.one_in(3) {
-      quota = quota.at_most(lane, rng.below(4));
+      quota = quota.limit_with(lane, rng.below(4));
     }
   }
   if rng.one_in(3) {
@@ -369,7 +371,7 @@ fn check_batch(
   }
   let limit = taken
     .iter()
-    .map(|item| quota.at_most_for(item.lane))
+    .map(|item| quota.limit_for(item.lane))
     .min()
     .unwrap_or(usize::MAX)
     .min(quota.limit());
@@ -387,7 +389,7 @@ fn check_batch(
   match (taken.first(), expected) {
     (Some(first), Some(expected)) => assert_eq!(first.lane, expected, "O2/O3, {context}"),
     (None, Some(expected)) => {
-      // Only a cap of zero stops a batch before its first item, and `admits` excludes it.
+      // Only a limit of zero stops a batch before its first item, and `admits` excludes it.
       panic!("nothing taken, {expected:?} waits, {context}");
     }
     (Some(_), None) => panic!("taken from nothing, {context}"),

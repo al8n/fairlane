@@ -31,7 +31,7 @@ pub const DEFAULT_MAX_WAIT: Duration = Duration::from_secs(2);
 ///
 /// The lanes of one view are read at different instants, one after another, so a view is not one
 /// atomic reading of the channel.
-pub trait Policy<P: Lane>: Send + Sync + 'static {
+pub trait Policy<L: Lane>: Send + Sync + 'static {
   /// What is recorded with each item at its commit. `()` records nothing and costs nothing.
   type Stamp: Copy + Send + 'static;
 
@@ -41,15 +41,15 @@ pub trait Policy<P: Lane>: Send + Sync + 'static {
 
   /// The lane that is owed service, or `None` to serve in priority order. A lane that is not in
   /// the view is ignored.
-  fn owed(&self, view: &LaneView<P, Self::Stamp>) -> Option<P>;
+  fn owed(&self, view: &LaneView<L, Self::Stamp>) -> Option<L>;
 }
 
 /// What a policy may read: the lanes one receive admits that are neither express nor empty.
 ///
 /// The channel builds one for each choice. A policy's tests, and any queue that is not a channel,
 /// build one by hand.
-pub struct LaneView<P: Lane, S> {
-  readings: PerLane<Option<Reading<S>>, P>,
+pub struct LaneView<L: Lane, S> {
+  readings: PerLane<Option<Reading<S>>, L>,
   now: S,
 }
 
@@ -60,7 +60,7 @@ struct Reading<S> {
   passed_over: u32,
 }
 
-impl<P: Lane, S: Copy> LaneView<P, S> {
+impl<L: Lane, S: Copy> LaneView<L, S> {
   /// A view with no lane yet, read at `now`.
   #[inline]
   pub fn new(now: S) -> Self {
@@ -74,7 +74,7 @@ impl<P: Lane, S: Copy> LaneView<P, S> {
   /// `passed_over` times since its last item was taken. A lane given twice keeps the second.
   #[must_use]
   #[inline]
-  pub fn with_lane(mut self, lane: P, queued: usize, oldest: Option<S>, passed_over: u32) -> Self {
+  pub fn with_lane(mut self, lane: L, queued: usize, oldest: Option<S>, passed_over: u32) -> Self {
     *self.readings.get_mut(lane) = Some(Reading {
       queued,
       oldest,
@@ -84,32 +84,32 @@ impl<P: Lane, S: Copy> LaneView<P, S> {
   }
 
   /// The lanes in the view, by priority.
-  pub fn lanes(&self) -> impl Iterator<Item = P> + '_ {
+  pub fn lanes(&self) -> impl Iterator<Item = L> + '_ {
     self
       .readings
       .as_slice()
       .iter()
       .enumerate()
       .filter(|(_, reading)| reading.is_some())
-      .filter_map(|(index, _)| P::from_index(index))
+      .filter_map(|(index, _)| L::from_index(index))
   }
 
   /// How many items `lane` holds; 0 for a lane not in the view.
   #[inline]
-  pub fn queued(&self, lane: P) -> usize {
+  pub fn queued(&self, lane: L) -> usize {
     self.reading(lane).map_or(0, |reading| reading.queued)
   }
 
   /// The stamp of `lane`'s oldest item, where the view has one.
   #[inline]
-  pub fn oldest(&self, lane: P) -> Option<S> {
+  pub fn oldest(&self, lane: L) -> Option<S> {
     self.reading(lane).and_then(|reading| reading.oldest)
   }
 
   /// How many items of other lanes were taken since `lane`'s last one; 0 for a lane not in the
   /// view.
   #[inline]
-  pub fn passed_over(&self, lane: P) -> u32 {
+  pub fn passed_over(&self, lane: L) -> u32 {
     self.reading(lane).map_or(0, |reading| reading.passed_over)
   }
 
@@ -121,7 +121,7 @@ impl<P: Lane, S: Copy> LaneView<P, S> {
 
   /// The same view with every stamp mapped through `f`: how a policy of two parts hands each
   /// part its own stamps.
-  pub fn map<U: Copy>(&self, f: impl Fn(S) -> U) -> LaneView<P, U> {
+  pub fn map<U: Copy>(&self, f: impl Fn(S) -> U) -> LaneView<L, U> {
     let readings = Array::from_fn(|index| {
       self.readings.at(index).map(|reading| Reading {
         queued: reading.queued,
@@ -137,12 +137,12 @@ impl<P: Lane, S: Copy> LaneView<P, S> {
 
   /// Whether `lane` is in the view. Never panics, whatever `lane.index()` answers.
   #[inline]
-  pub(crate) fn contains(&self, lane: P) -> bool {
+  pub(crate) fn contains(&self, lane: L) -> bool {
     self.reading(lane).is_some()
   }
 
   #[inline]
-  fn reading(&self, lane: P) -> Option<&Reading<S>> {
+  fn reading(&self, lane: L) -> Option<&Reading<S>> {
     self
       .readings
       .as_slice()
@@ -151,7 +151,7 @@ impl<P: Lane, S: Copy> LaneView<P, S> {
   }
 }
 
-impl<P: Lane, S: Copy> Clone for LaneView<P, S> {
+impl<L: Lane, S: Copy> Clone for LaneView<L, S> {
   #[inline]
   fn clone(&self) -> Self {
     Self {
@@ -161,10 +161,10 @@ impl<P: Lane, S: Copy> Clone for LaneView<P, S> {
   }
 }
 
-impl<P: Lane, S: Copy + fmt::Debug> fmt::Debug for LaneView<P, S> {
+impl<L: Lane, S: Copy + fmt::Debug> fmt::Debug for LaneView<L, S> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    struct Lanes<'a, P: Lane, S>(&'a LaneView<P, S>);
-    impl<P: Lane, S: Copy + fmt::Debug> fmt::Debug for Lanes<'_, P, S> {
+    struct Lanes<'a, L: Lane, S>(&'a LaneView<L, S>);
+    impl<L: Lane, S: Copy + fmt::Debug> fmt::Debug for Lanes<'_, L, S> {
       fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut map = f.debug_map();
         for lane in self.0.lanes() {
@@ -192,14 +192,14 @@ impl<P: Lane, S: Copy + fmt::Debug> fmt::Debug for LaneView<P, S> {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct Strict;
 
-impl<P: Lane> Policy<P> for Strict {
+impl<L: Lane> Policy<L> for Strict {
   type Stamp = ();
 
   #[inline]
   fn stamp(&self) {}
 
   #[inline]
-  fn owed(&self, _: &LaneView<P, ()>) -> Option<P> {
+  fn owed(&self, _: &LaneView<L, ()>) -> Option<L> {
     None
   }
 }
@@ -211,12 +211,12 @@ impl<P: Lane> Policy<P> for Strict {
 /// limit. A tie goes to the higher lane.
 ///
 /// The limits are live: [`set_limit`](Self::set_limit) takes effect at the next choice.
-pub struct PassLimit<P: Lane> {
+pub struct PassLimit<L: Lane> {
   /// One limit per lane; 0 is no limit.
-  limits: PerLane<AtomicU32, P>,
+  limits: PerLane<AtomicU32, L>,
 }
 
-impl<P: Lane> PassLimit<P> {
+impl<L: Lane> PassLimit<L> {
   /// `limit` for every lane.
   pub fn new(limit: NonZeroU32) -> Self {
     Self {
@@ -227,20 +227,20 @@ impl<P: Lane> PassLimit<P> {
   /// The same policy with `lane`'s limit replaced; `None` lets the lane starve.
   #[must_use]
   #[inline]
-  pub fn with_lane(self, lane: P, limit: Option<NonZeroU32>) -> Self {
+  pub fn with_lane(self, lane: L, limit: Option<NonZeroU32>) -> Self {
     self.set_limit(lane, limit);
     self
   }
 
   /// `lane`'s limit, where it has one.
   #[inline]
-  pub fn limit(&self, lane: P) -> Option<NonZeroU32> {
+  pub fn limit(&self, lane: L) -> Option<NonZeroU32> {
     NonZeroU32::new(self.limits.get(lane).load(Ordering::Relaxed))
   }
 
   /// Replaces `lane`'s limit, live: the next choice reads it.
   #[inline]
-  pub fn set_limit(&self, lane: P, limit: Option<NonZeroU32>) {
+  pub fn set_limit(&self, lane: L, limit: Option<NonZeroU32>) {
     self
       .limits
       .get(lane)
@@ -248,7 +248,7 @@ impl<P: Lane> PassLimit<P> {
   }
 }
 
-impl<P: Lane> Default for PassLimit<P> {
+impl<L: Lane> Default for PassLimit<L> {
   /// [`DEFAULT_PASS_LIMIT`] for every lane.
   #[inline]
   fn default() -> Self {
@@ -256,9 +256,9 @@ impl<P: Lane> Default for PassLimit<P> {
   }
 }
 
-impl<P: Lane> fmt::Debug for PassLimit<P> {
+impl<L: Lane> fmt::Debug for PassLimit<L> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    let limits = PerLane::<Option<NonZeroU32>, P>::from_array(Array::from_fn(|index| {
+    let limits = PerLane::<Option<NonZeroU32>, L>::from_array(Array::from_fn(|index| {
       NonZeroU32::new(self.limits.at(index).load(Ordering::Relaxed))
     }));
     f.debug_struct("PassLimit")
@@ -267,14 +267,14 @@ impl<P: Lane> fmt::Debug for PassLimit<P> {
   }
 }
 
-impl<P: Lane> Policy<P> for PassLimit<P> {
+impl<L: Lane> Policy<L> for PassLimit<L> {
   type Stamp = ();
 
   #[inline]
   fn stamp(&self) {}
 
-  fn owed(&self, view: &LaneView<P, ()>) -> Option<P> {
-    let mut owed: Option<(P, u32)> = None;
+  fn owed(&self, view: &LaneView<L, ()>) -> Option<L> {
+    let mut owed: Option<(L, u32)> = None;
     for lane in view.lanes() {
       let Some(limit) = self.limit(lane) else {
         continue;
@@ -301,9 +301,9 @@ impl<P: Lane> Policy<P> for PassLimit<P> {
 /// more overdue.
 ///
 /// The waits are live: [`set_max_wait`](Self::set_max_wait) takes effect at the next choice.
-pub struct Elapsed<P: Lane, C: Clock = Monotonic> {
+pub struct Elapsed<L: Lane, C: Clock = Monotonic> {
   /// One wait per lane, in nanoseconds; `u64::MAX` is no wait.
-  max_waits: PerLane<AtomicU64, P>,
+  max_waits: PerLane<AtomicU64, L>,
   clock: C,
 }
 
@@ -315,7 +315,7 @@ fn wait_nanos(max_wait: Option<Duration>) -> u64 {
   max_wait.map_or(NO_WAIT, |wait| saturating_nanos(wait).min(NO_WAIT - 1))
 }
 
-impl<P: Lane> Elapsed<P> {
+impl<L: Lane> Elapsed<L> {
   /// `max_wait` for every lane, on a [`Monotonic`] clock started now.
   #[inline]
   pub fn new(max_wait: Duration) -> Self {
@@ -323,7 +323,7 @@ impl<P: Lane> Elapsed<P> {
   }
 }
 
-impl<P: Lane, C: Clock> Elapsed<P, C> {
+impl<L: Lane, C: Clock> Elapsed<L, C> {
   /// `max_wait` for every lane, on `clock`.
   pub fn with_clock(max_wait: Duration, clock: C) -> Self {
     let nanos = wait_nanos(Some(max_wait));
@@ -336,21 +336,21 @@ impl<P: Lane, C: Clock> Elapsed<P, C> {
   /// The same policy with `lane`'s wait replaced; `None` lets the lane starve.
   #[must_use]
   #[inline]
-  pub fn with_lane(self, lane: P, max_wait: Option<Duration>) -> Self {
+  pub fn with_lane(self, lane: L, max_wait: Option<Duration>) -> Self {
     self.set_max_wait(lane, max_wait);
     self
   }
 
   /// `lane`'s longest wait, where it has one.
   #[inline]
-  pub fn max_wait(&self, lane: P) -> Option<Duration> {
+  pub fn max_wait(&self, lane: L) -> Option<Duration> {
     let nanos = self.max_waits.get(lane).load(Ordering::Relaxed);
     (nanos != NO_WAIT).then(|| Duration::from_nanos(nanos))
   }
 
   /// Replaces `lane`'s longest wait, live: the next choice reads it.
   #[inline]
-  pub fn set_max_wait(&self, lane: P, max_wait: Option<Duration>) {
+  pub fn set_max_wait(&self, lane: L, max_wait: Option<Duration>) {
     self
       .max_waits
       .get(lane)
@@ -358,7 +358,7 @@ impl<P: Lane, C: Clock> Elapsed<P, C> {
   }
 }
 
-impl<P: Lane> Default for Elapsed<P> {
+impl<L: Lane> Default for Elapsed<L> {
   /// [`DEFAULT_MAX_WAIT`] for every lane, on a [`Monotonic`] clock started now.
   #[inline]
   fn default() -> Self {
@@ -366,9 +366,9 @@ impl<P: Lane> Default for Elapsed<P> {
   }
 }
 
-impl<P: Lane, C: Clock + fmt::Debug> fmt::Debug for Elapsed<P, C> {
+impl<L: Lane, C: Clock + fmt::Debug> fmt::Debug for Elapsed<L, C> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    let waits = PerLane::<Option<Duration>, P>::from_array(Array::from_fn(|index| {
+    let waits = PerLane::<Option<Duration>, L>::from_array(Array::from_fn(|index| {
       let nanos = self.max_waits.at(index).load(Ordering::Relaxed);
       (nanos != NO_WAIT).then(|| Duration::from_nanos(nanos))
     }));
@@ -379,7 +379,7 @@ impl<P: Lane, C: Clock + fmt::Debug> fmt::Debug for Elapsed<P, C> {
   }
 }
 
-impl<P: Lane, C: Clock> Policy<P> for Elapsed<P, C> {
+impl<L: Lane, C: Clock> Policy<L> for Elapsed<L, C> {
   type Stamp = Moment;
 
   #[inline]
@@ -387,9 +387,9 @@ impl<P: Lane, C: Clock> Policy<P> for Elapsed<P, C> {
     self.clock.now()
   }
 
-  fn owed(&self, view: &LaneView<P, Moment>) -> Option<P> {
+  fn owed(&self, view: &LaneView<L, Moment>) -> Option<L> {
     let now = view.now();
-    let mut owed: Option<(P, u64)> = None;
+    let mut owed: Option<(L, u64)> = None;
     for lane in view.lanes() {
       let max_wait = self.max_waits.get(lane).load(Ordering::Relaxed);
       if max_wait == NO_WAIT {
@@ -460,7 +460,7 @@ impl<A: Copy, B: Copy> Stamps<A, B> {
   }
 }
 
-impl<P: Lane, A: Policy<P>, B: Policy<P>> Policy<P> for FirstOf<A, B> {
+impl<L: Lane, A: Policy<L>, B: Policy<L>> Policy<L> for FirstOf<A, B> {
   type Stamp = Stamps<A::Stamp, B::Stamp>;
 
   #[inline]
@@ -471,7 +471,7 @@ impl<P: Lane, A: Policy<P>, B: Policy<P>> Policy<P> for FirstOf<A, B> {
     }
   }
 
-  fn owed(&self, view: &LaneView<P, Self::Stamp>) -> Option<P> {
+  fn owed(&self, view: &LaneView<L, Self::Stamp>) -> Option<L> {
     self
       .first
       .owed(&view.map(|stamps| stamps.first))
@@ -483,7 +483,7 @@ impl<P: Lane, A: Policy<P>, B: Policy<P>> Policy<P> for FirstOf<A, B> {
 ///
 /// Its `Default` is [`DEFAULT_PASS_LIMIT`] and [`DEFAULT_MAX_WAIT`] for every lane. Both numbers
 /// are live through [`first`](FirstOf::first) and [`second`](FirstOf::second).
-pub type DefaultPolicy<P> = FirstOf<PassLimit<P>, Elapsed<P>>;
+pub type DefaultPolicy<L> = FirstOf<PassLimit<L>, Elapsed<L>>;
 
 #[cfg(feature = "either")]
 mod either_impl;

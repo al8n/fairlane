@@ -7,24 +7,24 @@ fn quota_up_to_admits_every_lane() {
   assert_eq!(quota.limit(), 32);
   for lane in Three::ALL {
     assert!(quota.admits(lane));
-    assert_eq!(quota.at_most_for(lane), 32);
+    assert_eq!(quota.limit_for(lane), 32);
   }
   assert!(quota.admits_any());
 }
 
 #[test]
-fn quota_at_most_is_capped_by_the_limit() {
+fn quota_limit_with_is_capped_by_the_limit() {
   let quota = Quota::<Three>::up_to(8)
-    .at_most(Three::A, 1)
-    .at_most(Three::B, 100);
-  assert_eq!(quota.at_most_for(Three::A), 1);
-  assert_eq!(quota.at_most_for(Three::B), 8);
-  assert_eq!(quota.at_most_for(Three::C), 8);
+    .limit_with(Three::A, 1)
+    .limit_with(Three::B, 100);
+  assert_eq!(quota.limit_for(Three::A), 1);
+  assert_eq!(quota.limit_for(Three::B), 8);
+  assert_eq!(quota.limit_for(Three::C), 8);
 }
 
 #[test]
-fn quota_at_most_zero_admits_none_of_the_lane() {
-  let quota = Quota::<Three>::up_to(8).at_most(Three::B, 0);
+fn quota_limit_with_zero_admits_none_of_the_lane() {
+  let quota = Quota::<Three>::up_to(8).limit_with(Three::B, 0);
   assert!(!quota.admits(Three::B));
   assert!(quota.admits(Three::C));
 }
@@ -82,11 +82,11 @@ fn quota_that_admits_nothing() {
   let zeroes = Three::ALL
     .iter()
     .fold(Quota::<Three>::up_to(4), |quota, &lane| {
-      quota.at_most(lane, 0)
+      quota.limit_with(lane, 0)
     });
   assert!(!zeroes.admits_any());
   let one_left = Quota::<Three>::up_to(4)
-    .at_most(Three::A, 0)
+    .limit_with(Three::A, 0)
     .lanes(..=Three::A);
   assert!(!one_left.admits_any());
 }

@@ -108,10 +108,10 @@ fn fits_holds_a_batch_to_its_limit() {
 }
 
 /// Gate condition 1's shape: a batch that holds one batch item may not take an interactive item
-/// whose cap is one.
+/// whose limit is one.
 #[test]
 fn fits_stops_at_x4s_shape() {
-  // The quota's limit is 32, and the batch lane's cap is 32: the effective limit stays 32.
+  // The quota's limit is 32, and the batch lane's limit is 32: the effective limit stays 32.
   let held = 1;
   let limit = 32;
   assert!(!fits(held, limit, 1));

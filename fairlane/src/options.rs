@@ -49,18 +49,18 @@ impl LaneOptions {
 /// It has no `Default`, because a capacity is a required decision. [`from_fn`](Self::from_fn) is
 /// the one constructor, so a lane cannot silently take another lane's numbers.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Options<P: Lane> {
-  lanes: PerLane<LaneOptions, P>,
+pub struct Options<L: Lane> {
+  lanes: PerLane<LaneOptions, L>,
 }
 
-impl<P: Lane> Options<P> {
+impl<L: Lane> Options<L> {
   /// Every lane's options, from `f`.
   ///
   /// # Panics
   ///
   /// As [`PerLane::from_fn`]: only for a hand-written [`Lane`] that breaks its contract.
   #[inline]
-  pub fn from_fn(f: impl FnMut(P) -> LaneOptions) -> Self {
+  pub fn from_fn(f: impl FnMut(L) -> LaneOptions) -> Self {
     Self {
       lanes: PerLane::from_fn(f),
     }
@@ -68,14 +68,14 @@ impl<P: Lane> Options<P> {
 
   /// The options of `lane`.
   #[inline]
-  pub fn lane(&self, lane: P) -> &LaneOptions {
+  pub fn lane(&self, lane: L) -> &LaneOptions {
     self.lanes.get(lane)
   }
 
   /// The same options with `lane`'s replaced.
   #[must_use]
   #[inline]
-  pub fn with_lane(mut self, lane: P, options: LaneOptions) -> Self {
+  pub fn with_lane(mut self, lane: L, options: LaneOptions) -> Self {
     *self.lanes.get_mut(lane) = options;
     self
   }
@@ -92,7 +92,7 @@ impl<P: Lane> Options<P> {
     let options = self.lanes.at(index);
     options
       .express
-      .unwrap_or_else(|| P::from_index(index).is_some_and(Lane::is_express))
+      .unwrap_or_else(|| L::from_index(index).is_some_and(Lane::is_express))
   }
 
   /// Refuses, by name, options no channel can be made from: no lane; a vocabulary whose indices
@@ -100,16 +100,16 @@ impl<P: Lane> Options<P> {
   /// [`MAX_CAPACITY`]. A capacity the ring cannot allocate for its item type is refused where the
   /// ring is made.
   pub(crate) fn check(&self) -> Result<(), Malformed> {
-    let count = lane_count::<P>();
+    let count = lane_count::<L>();
     if count == 0 {
       return Err(Malformed::NoLanes);
     }
     for index in 0..count {
-      if P::from_index(index).is_none_or(|lane| lane.index() != index) {
+      if L::from_index(index).is_none_or(|lane| lane.index() != index) {
         return Err(Malformed::Indices(index));
       }
     }
-    if P::from_index(count).is_some() {
+    if L::from_index(count).is_some() {
       return Err(Malformed::Indices(count));
     }
     for index in 1..count {

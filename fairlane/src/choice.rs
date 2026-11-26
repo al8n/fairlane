@@ -15,7 +15,7 @@ use crate::{
 /// The view holds the lanes that may be served now: admitted, not express, and not empty.
 /// Express lanes are served before this choice is made.
 #[inline]
-pub fn choose<P: Lane, Y: Policy<P>>(view: &LaneView<P, Y::Stamp>, policy: &Y) -> Option<P> {
+pub fn choose<L: Lane, Y: Policy<L>>(view: &LaneView<L, Y::Stamp>, policy: &Y) -> Option<L> {
   policy
     .owed(view)
     .filter(|&lane| view.contains(lane))
@@ -25,10 +25,10 @@ pub fn choose<P: Lane, Y: Policy<P>>(view: &LaneView<P, Y::Stamp>, policy: &Y) -
 /// After an item of `served` was taken: `served`'s passed-over count is zero, and every other lane
 /// of the view has one more. A lane outside the view keeps its count.
 #[inline]
-pub fn count<P: Lane, S: Copy>(
-  passed_over: &mut PerLane<u32, P>,
-  served: P,
-  view: &LaneView<P, S>,
+pub fn count<L: Lane, S: Copy>(
+  passed_over: &mut PerLane<u32, L>,
+  served: L,
+  view: &LaneView<L, S>,
 ) {
   for lane in view.lanes() {
     if lane != served {
@@ -40,11 +40,11 @@ pub fn count<P: Lane, S: Copy>(
 }
 
 /// Whether a batch that holds `held` items, under an effective `limit`, may take one more of a
-/// lane whose cap is `at_most`. The effective limit is the quota's, lowered by the cap of every
-/// lane the batch already holds an item of.
+/// lane whose limit is `lane_limit`. The effective limit is the quota's, lowered by the limit of
+/// every lane the batch already holds an item of.
 #[inline]
-pub(crate) fn fits(held: usize, limit: usize, at_most: usize) -> bool {
-  held < limit.min(at_most)
+pub(crate) fn fits(held: usize, limit: usize, lane_limit: usize) -> bool {
+  held < limit.min(lane_limit)
 }
 
 #[cfg(test)]
