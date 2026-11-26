@@ -82,7 +82,10 @@ fn ring_close_hands_a_later_push_its_item() {
   assert!(ring.close());
   assert!(!ring.close());
   assert!(ring.is_closed());
-  assert_eq!(ring.push("late".to_owned(), || ()), Err("late".to_owned()));
+  assert_eq!(
+    ring.push("late".to_owned(), || ()),
+    Err(Refused::Closed("late".to_owned()))
+  );
   assert!(!ring.is_ended());
   assert_eq!(ring.pop().unwrap().item, "kept");
   assert!(ring.is_ended());
@@ -271,4 +274,27 @@ fn ring_takes_a_stamp_only_where_it_keeps_one() {
     .unwrap();
   assert_eq!(taken, 1);
   assert_eq!(stamped.pop().unwrap().stamp, Some(9));
+}
+
+/// A ring takes pushes up to its last position; the next push claims none, closes the ring, and
+/// gets its item back without a stamp. Every item committed is still popped, with its ordinal.
+#[test]
+fn ring_closes_at_its_last_position() {
+  let ring = Ring::<u32, u64>::new(2, true).unwrap();
+  ring.skip_to(LAST - 1);
+  assert_eq!(ring.push(1, || 0), Ok(LAST - 1));
+  assert_eq!(ring.push(2, || 0), Ok(LAST));
+  assert_eq!(
+    ring.push(3, || unreachable!(
+      "no stamp for a push past the last position"
+    )),
+    Err(Refused::Exhausted(3))
+  );
+  assert!(ring.is_closed());
+  assert_eq!(ring.committed(), LAST + 1);
+  assert_eq!(ring.pop().unwrap().ordinal, LAST - 1);
+  assert_eq!(ring.pop().unwrap().ordinal, LAST);
+  assert!(ring.pop().is_none());
+  assert!(ring.is_ended());
+  assert_eq!(ring.push(4, || 0), Err(Refused::Exhausted(4)));
 }

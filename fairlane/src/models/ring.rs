@@ -7,7 +7,7 @@ use loom::{
 };
 
 use super::model;
-use crate::ring::Ring;
+use crate::ring::{LAST, Refused, Ring};
 
 /// Two pushers, each with a permit, and one popper, on a ring of two cells. Both items are popped
 /// once, each with the ordinal its push answered.
@@ -153,5 +153,39 @@ fn mk3_a_push_of_the_next_lap_waits_for_a_slow_popper() {
     items.push(ring.pop().unwrap().item);
     items.sort_unstable();
     assert_eq!(items, [1, 2, 3]);
+  });
+}
+
+/// Two pushers race for a ring's last position: one commits there, the other finds every position
+/// spent and gets its item back, and the ring is closed. The committed item is popped with its
+/// ordinal, and the ring ends.
+#[test]
+fn mk5_the_last_position_is_committed_once() {
+  model(|| {
+    let ring = Arc::new(Ring::<u32, ()>::new(2, false).unwrap());
+    ring.skip_to(LAST);
+    let pushers: Vec<_> = [1, 2]
+      .into_iter()
+      .map(|item| {
+        let ring = ring.clone();
+        thread::spawn(move || ring.push(item, || ()))
+      })
+      .collect();
+    let pushed: Vec<_> = pushers.into_iter().map(|h| h.join().unwrap()).collect();
+    let committed: Vec<u64> = pushed
+      .iter()
+      .filter_map(|p| p.as_ref().ok().copied())
+      .collect();
+    assert_eq!(committed, [LAST], "one push commits at the last position");
+    assert!(
+      pushed
+        .iter()
+        .any(|p| matches!(p, Err(Refused::Exhausted(_)))),
+      "the other finds every position spent"
+    );
+    assert!(ring.is_closed());
+    assert_eq!(ring.pop().map(|popped| popped.ordinal), Some(LAST));
+    assert!(ring.pop().is_none());
+    assert!(ring.is_ended());
   });
 }

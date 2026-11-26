@@ -350,3 +350,43 @@ fn a_single_receive_asks_the_policy_once() {
     "the panic took no item"
   );
 }
+
+/// A lane whose positions are spent closes alone. The send that finds it so gets its item back,
+/// a later reserve of the lane resolves `Closed`, and the channel and its other lanes stay open.
+#[test]
+fn a_lane_closes_alone_at_its_last_position() {
+  use crate::ring::LAST;
+
+  let (tx, rx) = channel_with::<u32, Three, _>(three(1, false), Strict).unwrap();
+  tx.shared().lane_at(1).ring.skip_to(LAST);
+  tx.try_send(Three::B, 1).unwrap();
+  let (probe, waker) = Probe::new();
+  let mut waiting = tx.reserve(Three::B);
+  assert!(poll_with(&mut waiting, &waker).is_pending());
+  assert_eq!(rx.try_recv().unwrap().unwrap().ordinal(), LAST);
+  assert!(probe.take(), "the room went to the waiting reserve");
+  let Poll::Ready(Ok(permit)) = poll_with(&mut waiting, &waker) else {
+    panic!("the waiting reserve holds the room");
+  };
+  assert_eq!(
+    permit.send(2),
+    Err(SendError(2)),
+    "every position of B is spent"
+  );
+
+  let mut late = tx.reserve(Three::B);
+  assert!(matches!(
+    poll_with(&mut late, &waker),
+    Poll::Ready(Err(Closed))
+  ));
+  assert_eq!(tx.try_send(Three::B, 3), Err(TrySendError::Closed(3)));
+  assert!(!tx.is_closed(), "the channel stays open");
+  tx.try_send(Three::C, 4).unwrap();
+  assert_eq!(rx.try_recv().unwrap().unwrap().lane(), Three::C);
+  let mut batch = Vec::new();
+  assert_eq!(
+    rx.try_recv_many(&mut batch, Quota::up_to(1).lanes(Three::B..=Three::B)),
+    Err(RecvManyError::Ended),
+    "lane B is closed and empty"
+  );
+}

@@ -4,8 +4,9 @@
 //! each cell may carry a stamp beside its item.
 //!
 //! - **Positions.** `tail` counts every position ever claimed by a push and `head` every position
-//!   ever claimed by a pop. Position `p` lives in cell `p & mask`. A position never reaches the
-//!   mark bit: that is 2^63 pushes.
+//!   ever claimed by a pop. Position `p` lives in cell `p & mask`. Positions run to `MARK - 2`, so
+//!   a ring takes 2^63 − 1 pushes in its life and the tail never carries into the mark: a push
+//!   that finds every position spent claims none, closes the ring, and gets its item back.
 //! - **A cell's sequence** says whose turn it is at that cell: `p` while it is free for the push of
 //!   position `p`; `p + 1` once that push has written it; `p + len` once the pop of `p` has read
 //!   it, which frees it for the push of the next lap.
@@ -44,12 +45,26 @@ use crate::sync::{AtomicU64, Ordering, Spin, UnsafeCell};
 /// The close mark: the top bit of the tail.
 const MARK: u64 = 1 << 63;
 
+/// The last position a push claims. Claiming the next would carry the tail into the mark, where a
+/// committed item would read as a closed, empty ring.
+pub(crate) const LAST: u64 = MARK - 2;
+
 /// The fewest cells a ring has (see the module's sequences).
 const MIN_CELLS: usize = 2;
 
 struct Cell<T> {
   sequence: AtomicU64,
   value: UnsafeCell<MaybeUninit<T>>,
+}
+
+/// Why a push committed nothing: its item comes back in either case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Refused<T> {
+  /// The ring is closed.
+  Closed(T),
+  /// Every position of the ring is spent, and the ring is closed for it: by this push, or by an
+  /// earlier one that found it so.
+  Exhausted(T),
 }
 
 /// One item as it left the ring.
@@ -116,7 +131,7 @@ impl<T, S: Copy> Ring<T, S> {
   }
 
   /// Commits `item` at the next position, and answers the position: its ordinal. Where the ring is
-  /// closed, nothing is committed and the item comes back.
+  /// closed, or its positions are spent, nothing is committed and the item comes back.
   ///
   /// A stamped ring calls `stamp` once, just before the commit; an unstamped ring never calls it.
   /// A ring closed before the push began never calls it: the mark is read first, and a close that
@@ -124,15 +139,16 @@ impl<T, S: Copy> Ring<T, S> {
   ///
   /// The caller holds room for the item. Without it the push would still be sound, since a ring has
   /// at least two cells, and would wait for a pop to free its cell.
-  pub(crate) fn push(&self, item: T, stamp: impl FnOnce() -> S) -> Result<u64, T> {
+  pub(crate) fn push(&self, item: T, stamp: impl FnOnce() -> S) -> Result<u64, Refused<T>> {
     let mut tail = self.tail.load(Ordering::Relaxed);
-    if tail & MARK != 0 {
-      return Err(item);
+    // One comparison covers both refusals: a marked tail is above every position.
+    if tail > LAST {
+      return Err(self.refuse(item, tail));
     }
     let stamp = self.stamps.is_some().then(stamp);
     let position = loop {
-      if tail & MARK != 0 {
-        return Err(item);
+      if tail > LAST {
+        return Err(self.refuse(item, tail));
       }
       // `SeqCst`: a receiver going to sleep counts itself before it reads the tail, and this push
       // reads that count after it moves the tail. One of the two sees the other.
@@ -174,6 +190,19 @@ impl<T, S: Copy> Ring<T, S> {
     // `Release` publishes the item and its stamp to the pop that reads `position + 1`.
     cell.sequence.store(position + 1, Ordering::Release);
     Ok(position)
+  }
+
+  /// Why a push that read `tail` claims nothing. A tail at `LAST + 1`, marked or not, has spent
+  /// every position; the push sets the mark, where no close has, so that every later push and the
+  /// lane's end read it.
+  #[cold]
+  fn refuse(&self, item: T, tail: u64) -> Refused<T> {
+    if tail & !MARK > LAST {
+      self.close();
+      Refused::Exhausted(item)
+    } else {
+      Refused::Closed(item)
+    }
   }
 
   /// Takes the oldest item, or answers `None` where the ring is empty: head and tail meet.
@@ -278,6 +307,22 @@ impl<T, S: Copy> Ring<T, S> {
   #[inline]
   pub(crate) fn received(&self) -> u64 {
     self.head.load(Ordering::Relaxed)
+  }
+
+  /// Moves an empty, unshared ring's positions on to `start`, as if `start` items had passed:
+  /// how a test reaches the end of a ring's positions.
+  #[cfg(test)]
+  pub(crate) fn skip_to(&self, start: u64) {
+    assert!(self.is_empty() && start <= LAST + 1);
+    let len = self.mask + 1;
+    for (index, cell) in (0_u64..).zip(self.cells.iter()) {
+      // The first position at or after `start` that lives in this cell: its sequence is free
+      // for that position's push.
+      let position = start + (index + len - start % len) % len;
+      cell.sequence.store(position, Ordering::Relaxed);
+    }
+    self.head.store(start, Ordering::SeqCst);
+    self.tail.store(start, Ordering::SeqCst);
   }
 }
 

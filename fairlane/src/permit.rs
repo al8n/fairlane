@@ -35,7 +35,9 @@ impl<'a, T, L: Lane, Y: Policy<L>> Permit<'a, T, L, Y> {
   }
 
   /// Commits `item` to the permit's lane. It never waits. It fails only where the channel closed
-  /// after the permit was granted, and then hands the item back and lets the room go.
+  /// after the permit was granted, or where the lane has taken its 2^63 − 1 items and closed alone
+  /// ([`Received::ordinal`](crate::Received::ordinal)); it then hands the item back and lets the
+  /// room go.
   ///
   /// ```
   /// # use core::num::NonZeroUsize;

@@ -19,7 +19,7 @@ use crate::{
   reentry,
   remaining::{Remaining, free},
   reserves::Reserves,
-  ring::Ring,
+  ring::{Refused, Ring},
   sender::Sender,
   snapshot::{Reading, Snapshot},
   sync::{Arc, AtomicBool, AtomicUsize, Mutex, Ordering, lock},
@@ -241,8 +241,8 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   }
 
   /// Commits `item` through a permit of lane `index`, or hands it back where the lane closed after
-  /// the permit was granted; the permit's room is let go then, and also where the policy's `stamp`
-  /// unwinds before the commit.
+  /// the permit was granted, or has spent its positions; the permit's room is let go then, and
+  /// also where the policy's `stamp` unwinds before the commit.
   pub(crate) fn commit(&self, index: usize, item: T) -> Result<(), T> {
     let state = self.lane_at(index);
     let refund = Refund(state);
@@ -253,11 +253,30 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
         wake(state.arrivals.wake_one());
         Ok(())
       }
-      Err(item) => {
+      Err(Refused::Closed(item)) => {
+        drop(refund);
+        Err(item)
+      }
+      Err(Refused::Exhausted(item)) => {
+        // Closed before the refund, so that the room lands on a closed lane and grants nobody.
+        self.close_lane(index);
         drop(refund);
         Err(item)
       }
     }
+  }
+
+  /// Closes lane `index` alone, its ring's positions spent: its room, the reserves in its line and
+  /// the receivers in its line, as a close does each lane. The ring is marked already, and the
+  /// channel stays open. Every push that finds the lane so runs it, so the lane's waiters never
+  /// wait on the thread that spent its last position.
+  fn close_lane(&self, index: usize) {
+    let state = self.lane_at(index);
+    let mut wakers = Vec::new();
+    state.reserves.close(&state.remaining, &mut wakers);
+    state.ring.close();
+    state.arrivals.close(&mut wakers);
+    wake_all(wakers);
   }
 
   /// Closes every lane, in index order: its room first, so that no reserve is granted, then its

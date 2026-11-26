@@ -51,6 +51,9 @@ impl<T, L: Lane> Received<T, L> {
 
   /// Its place among everything ever committed to its lane: 0 for the lane's first item, and no
   /// gap. Order is defined within a lane; across lanes, priority decides.
+  ///
+  /// A lane takes 2^63 − 1 items in its life, so an ordinal is below that. The send that finds
+  /// every one spent closes that lane alone, and gets its item back.
   #[inline]
   pub fn ordinal(&self) -> u64 {
     self.ordinal
