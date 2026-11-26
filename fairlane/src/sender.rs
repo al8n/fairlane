@@ -5,8 +5,6 @@ use core::{
   task::{Context, Poll},
 };
 
-use event_listener::EventListener;
-
 use crate::{
   channel::Shared,
   error::{Closed, SendError, TryReserveError, TrySendError},
@@ -18,6 +16,7 @@ use crate::{
   reserves::Wait,
   snapshot::Snapshot,
   sync::Arc,
+  waiters::Key,
   wake::Spare,
 };
 
@@ -183,7 +182,7 @@ impl<T, L: Lane, Y: Policy<L>> Sender<T, L, Y> {
   pub fn closed(&self) -> WhenClosed<'_, T, L, Y> {
     WhenClosed {
       shared: &self.shared,
-      listener: None,
+      key: None,
     }
   }
 
@@ -403,7 +402,8 @@ impl<T, L: Lane, Y: Policy<L>> fmt::Debug for Sending<'_, T, L, Y> {
 #[must_use = "a future does nothing unless polled"]
 pub struct WhenClosed<'a, T, L: Lane, Y: Policy<L>> {
   shared: &'a Shared<T, L, Y>,
-  listener: Option<EventListener>,
+  /// Its place in the closers' line, once it waits.
+  key: Option<Key>,
 }
 
 impl<T, L: Lane, Y: Policy<L>> Future for WhenClosed<'_, T, L, Y> {
@@ -411,21 +411,14 @@ impl<T, L: Lane, Y: Policy<L>> Future for WhenClosed<'_, T, L, Y> {
 
   fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
     let this = self.get_mut();
-    loop {
-      if this.shared.is_closed() {
-        this.listener = None;
-        return Poll::Ready(());
-      }
-      match &mut this.listener {
-        None => this.listener = Some(this.shared.closed_event().listen()),
-        Some(listener) => {
-          if Pin::new(listener).poll(cx).is_pending() {
-            return Poll::Pending;
-          }
-          this.listener = None;
-        }
-      }
-    }
+    this.shared.poll_closed(&mut this.key, cx.waker())
+  }
+}
+
+impl<T, L: Lane, Y: Policy<L>> Drop for WhenClosed<'_, T, L, Y> {
+  #[inline]
+  fn drop(&mut self) {
+    self.shared.leave_closed(&mut self.key);
   }
 }
 

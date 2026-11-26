@@ -238,6 +238,7 @@ impl<T, S: Copy> Ring<T, S> {
     self.tail.fetch_or(MARK, Ordering::SeqCst) & MARK == 0
   }
 
+  #[cfg(test)]
   #[inline]
   pub(crate) fn is_closed(&self) -> bool {
     self.tail.load(Ordering::SeqCst) & MARK != 0

@@ -133,11 +133,6 @@ mod faulty {
       // drop releases its own.
       unsafe { Waker::from_raw(raw(data)) }
     }
-
-    /// Whether the waker was woken since the last call.
-    pub(crate) fn take(&self) -> bool {
-      self.wakes.swap(0, SeqCst) > 0
-    }
   }
 
   const VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake_by_ref, drop);

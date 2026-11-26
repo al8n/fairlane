@@ -1,8 +1,11 @@
 //! What the two halves share, and the constructors.
 
-use core::{num::NonZeroUsize, panic::AssertUnwindSafe, task::Waker};
+use core::{
+  num::NonZeroUsize,
+  panic::AssertUnwindSafe,
+  task::{Poll, Waker},
+};
 
-use event_listener::Event;
 use hybrid_array::Array;
 
 use crate::{
@@ -18,7 +21,8 @@ use crate::{
   sender::Sender,
   snapshot::{Reading, Snapshot},
   sync::{Arc, AtomicBool, AtomicUsize, Mutex, Ordering, lock},
-  wake::{wake, wake_all},
+  waiters::{Key, State, Waiters},
+  wake::{Wakes, wake, wake_all},
 };
 
 /// A channel of several lanes, with the default policy: a count and a time, whichever comes first
@@ -142,8 +146,10 @@ pub(crate) struct Shared<T, L: Lane, Y: Policy<L>> {
   receivers: AtomicUsize,
   /// Set by the first `close`, so that exactly one call answers `true`.
   closing: AtomicBool,
-  /// Woken once every lane is closed: `WhenClosed`.
-  closed: Event,
+  /// Set by a `close` once it has marked every lane: `is_closed`.
+  closed: AtomicBool,
+  /// The `closed()` futures that wait, notified once the channel is closed.
+  closers: Mutex<Waiters>,
 }
 
 impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
@@ -174,7 +180,8 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
       senders: AtomicUsize::new(1),
       receivers: AtomicUsize::new(1),
       closing: AtomicBool::new(false),
-      closed: Event::new(),
+      closed: AtomicBool::new(false),
+      closers: Mutex::new(Waiters::new()),
     })
   }
 
@@ -235,37 +242,99 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   /// nothing commits anywhere once any `close` has returned. True for the one call that came
   /// first.
   ///
-  /// The reserves and the receivers it closes are woken once every lane is marked: a waker is
-  /// user code, and one that panics leaves no lane open.
+  /// Everything a close wakes, its reserves, its receivers and its `closed()` futures, is woken
+  /// once every state change of the close is done: a waker is user code, and one that panics
+  /// leaves no lane open.
   pub(crate) fn close(&self) -> bool {
-    let first = !self.closing.swap(true, Ordering::SeqCst);
     let mut wakers = Vec::new();
-    for state in self.lanes.as_slice() {
-      state.reserves.close(&state.remaining, &mut wakers);
-      state.ring.close();
-    }
-    for state in self.lanes.as_slice() {
-      state.arrivals.close(&mut wakers);
-    }
-    self.closed.notify(usize::MAX);
+    let first = self.shut(&mut wakers);
     wake_all(wakers);
     first
   }
 
-  /// Whether every lane is closed. A `close` marks the lanes in index order, so the last lane's
-  /// mark is set only once every lane's is.
-  #[inline]
-  pub(crate) fn is_closed(&self) -> bool {
-    self
-      .lanes
-      .as_slice()
-      .last()
-      .is_some_and(|state| state.ring.is_closed())
+  /// Every state change of a close, and no waker run: each lane's room and its ring's mark, each
+  /// lane's waiting receivers notified, the closed flag, and the `closed()` futures notified. The
+  /// wakers go onto `wakers`.
+  fn shut(&self, wakers: &mut Vec<Waker>) -> bool {
+    let first = !self.closing.swap(true, Ordering::SeqCst);
+    for state in self.lanes.as_slice() {
+      state.reserves.close(&state.remaining, wakers);
+      state.ring.close();
+    }
+    for state in self.lanes.as_slice() {
+      state.arrivals.close(wakers);
+    }
+    // `Release`, after every mark: a thread that reads the flag set (`Acquire`) sees every lane
+    // closed, so a send it makes afterwards reads its lane's mark.
+    self.closed.store(true, Ordering::Release);
+    lock(&self.closers).notify_all(wakers);
+    first
   }
 
+  /// Whether the channel is closed: a close has marked every lane.
   #[inline]
-  pub(crate) fn closed_event(&self) -> &Event {
-    &self.closed
+  pub(crate) fn is_closed(&self) -> bool {
+    self.closed.load(Ordering::Acquire)
+  }
+
+  /// Polls a `closed()` future, whose place in the closers' line is `key`: ready once the channel
+  /// is closed, else in line with `waker`.
+  pub(crate) fn poll_closed(&self, key: &mut Option<Key>, waker: &Waker) -> Poll<()> {
+    if key.is_none() && self.is_closed() {
+      return Poll::Ready(());
+    }
+    let mut wakes = Wakes::new();
+    let mut fresh: Option<Waker> = None;
+    let polled = loop {
+      {
+        let mut closers = lock(&self.closers);
+        match key {
+          // The flag is read under the lock a close takes after it sets the flag: either this
+          // read sees it, or the close finds this future in line.
+          None if self.is_closed() => break Poll::Ready(()),
+          None => {
+            if let Some(new) = fresh.take() {
+              *key = Some(closers.insert(new));
+              break Poll::Pending;
+            }
+          }
+          Some(place) => match closers.state(place) {
+            State::Queued if closers.will_wake(place, waker) => break Poll::Pending,
+            State::Queued => {
+              if let Some(new) = fresh.take() {
+                let replaced = closers.set_waker(place, new);
+                drop(closers);
+                wakes.discard(replaced);
+                break Poll::Pending;
+              }
+            }
+            State::Notified | State::Closed => {
+              let place = key.take().expect("the future is in line");
+              let (_, stored) = closers.remove(place);
+              drop(closers);
+              wakes.discard(stored);
+              break Poll::Ready(());
+            }
+          },
+        }
+      }
+      // A clone is user code: it is made with the lock let go, and the line read again after it.
+      fresh = Some(waker.clone());
+    };
+    wakes.discard(fresh);
+    wakes.finish();
+    polled
+  }
+
+  /// A `closed()` future dropped: it leaves the closers' line. A close wakes every future in line,
+  /// so there is no notification to pass on.
+  pub(crate) fn leave_closed(&self, key: &mut Option<Key>) {
+    if let Some(place) = key.take() {
+      let (_, stored) = lock(&self.closers).remove(place);
+      let mut wakes = Wakes::new();
+      wakes.discard(stored);
+      wakes.finish();
+    }
   }
 
   pub(crate) fn snapshot(&self) -> Snapshot<L> {
@@ -309,12 +378,14 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   }
 
   /// The last receiver gone closes the channel and lets go of every queued item, each dropped
-  /// under its own catch, so that one destructor that panics does not leak the rest.
+  /// under its own catch, so that one destructor that panics does not leak the rest. What the
+  /// close wakes is woken once the items are let go.
   pub(crate) fn drop_receiver(&self) {
     if self.receivers.fetch_sub(1, Ordering::AcqRel) != 1 {
       return;
     }
-    self.close();
+    let mut wakers = Vec::new();
+    self.shut(&mut wakers);
     let mut ahead = Vec::new();
     if let Some(choice) = &self.choice {
       let mut choice = lock(choice);
@@ -328,16 +399,17 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     // Each item is dropped after the choice lock is let go, under its own catch. The close has
     // emptied every line, so a room given back here grants no reserve.
     for (index, item) in ahead {
-      wake(self.lanes.at(index).release());
+      wakers.extend(self.lanes.at(index).release());
       let _ = std::panic::catch_unwind(AssertUnwindSafe(move || drop(item)));
     }
     for state in self.lanes.as_slice() {
       while let Some(popped) = state.ring.pop() {
-        wake(state.release());
+        wakers.extend(state.release());
         let item = popped.item;
         let _ = std::panic::catch_unwind(AssertUnwindSafe(move || drop(item)));
       }
     }
+    wake_all(wakers);
   }
 }
 

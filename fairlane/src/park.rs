@@ -41,9 +41,8 @@ mod std_driver {
 
 /// Under loom, loom's own driver. loom 0.7's `thread::unpark` ends a wait on a loom `Mutex` while
 /// the mutex is still held (`rt/thread.rs`, `set_unparked`), where std's `unpark` leaves a mutex
-/// wait alone; a waker run by another thread under an event's list lock would then wake this
-/// thread out of its wait for that lock. `block_on`'s waker is a loom `Notify`, which ends only a
-/// wait on itself.
+/// wait alone: a waker run by another thread while this thread waits for one of the crate's locks
+/// would end that wait. `block_on`'s waker is a loom `Notify`, which ends only a wait on itself.
 #[cfg(loom)]
 pub(crate) fn park_on<F: core::future::Future>(future: F) -> F::Output {
   loom::future::block_on(future)

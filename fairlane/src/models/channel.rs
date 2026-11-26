@@ -470,3 +470,29 @@ fn mc6_a_refreshed_reserve_resolves_at_a_close() {
     drop((closing.join().unwrap(), rx));
   });
 }
+
+/// A `closed()` future polled once with one waker, then driven with another, against a close: it
+/// resolves, and the channel reads closed.
+#[test]
+fn mc7_a_refreshed_when_closed_resolves_at_the_close() {
+  model(|| {
+    let (tx, rx) = channel(1);
+    let closer = tx.clone();
+    let watcher = thread::spawn(move || {
+      {
+        let mut closed = tx.closed();
+        if poll_once(&mut closed).is_pending() {
+          block_on(closed);
+        }
+      }
+      tx
+    });
+    let closing = thread::spawn(move || {
+      closer.close();
+      closer
+    });
+    let tx = watcher.join().unwrap();
+    assert!(tx.is_closed());
+    drop((tx, closing.join().unwrap(), rx));
+  });
+}
