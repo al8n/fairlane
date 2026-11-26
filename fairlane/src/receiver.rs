@@ -10,7 +10,7 @@ use hybrid_array::Array;
 
 use crate::{
   channel::Shared,
-  choice::{Choice, choose, count as count_choice, fits},
+  choice::{Choice, choose, fits},
   error::Ended,
   lane::{Lane, PerLane, Single, lane_count},
   park::park_on,
@@ -129,13 +129,16 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
       let Some(popped) = state.ring.pop() else {
         break;
       };
-      wake(state.release());
+      // The room goes back first, and the item to the sink; only then does the waker of a
+      // reserve the room was granted to run, so a waker that panics costs no item.
+      let granted = state.release();
       sink(Received {
         item: popped.item,
         lane: self.name(0),
         ordinal: popped.ordinal,
       });
       held += 1;
+      wake(granted);
     }
     match NonZeroUsize::new(held) {
       Some(held) => Took::Items(held),
@@ -157,6 +160,11 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   ///    another lane instead;
   /// 4. a lane that is not express is counted: its passed-over count to zero, and one more for
   ///    every other lane of the view.
+  ///
+  /// From the pop of an item to its delivery to the sink, no user code runs: its room is recorded,
+  /// the counts move by index, and its lane's name comes from the table read at the construction.
+  /// The policy and the `Lane` methods it calls run only before the pop, while every item already
+  /// taken is in the sink and every item looked ahead at is in the choice state.
   ///
   /// A batch that holds as many items as its effective limit stops before it reads the lanes
   /// again: no policy call comes after its last item, so a receive of one item makes none after
@@ -204,12 +212,11 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
       }
       let express =
         (0..count).find(|&index| waiting.as_slice()[index] && self.is_express_at(index));
-      let mut view = None;
+      // The view: the admitted lanes that hold an item and are not express.
+      let in_view = |index: usize| waiting.as_slice()[index] && !self.is_express_at(index);
       let chosen = match express {
         Some(index) => index,
         None => {
-          // The view: the admitted lanes that hold an item and are not express.
-          let in_view = |index: usize| waiting.as_slice()[index] && !self.is_express_at(index);
           let mut lanes = (0..count).filter(|&index| in_view(index));
           let Some(first) = lanes.next() else {
             break;
@@ -227,15 +234,14 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
                 .committed()
                 .saturating_sub(state.ring.received())
                 .saturating_add(u64::from(ahead.is_some()));
-              lane_view = lane_view.with_lane(
-                self.name(index),
+              lane_view = lane_view.with_index(
+                index,
                 usize::try_from(queued).unwrap_or(usize::MAX),
                 ahead.and_then(|popped| popped.stamp),
                 *choice.passed_over.at(index),
               );
             }
             let owed = choose(&lane_view, self.policy()).map_or(first, Lane::index);
-            view = Some(lane_view);
             if owed < count && in_view(owed) {
               owed
             } else {
@@ -260,15 +266,16 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
           None => break,
         },
       };
+      back.units.as_mut_slice()[chosen] += 1;
       held += 1;
       limit = limit.min(lane_limit);
       if express.is_none() {
-        match &view {
-          Some(view) => count_choice(&mut choice.passed_over, self.name(chosen), view),
-          None => choice.passed_over.as_mut_slice()[chosen] = 0,
+        let passed_over = choice.passed_over.as_mut_slice();
+        for index in (0..count).filter(|&index| index != chosen && in_view(index)) {
+          passed_over[index] = passed_over[index].saturating_add(1);
         }
+        passed_over[chosen] = 0;
       }
-      back.units.as_mut_slice()[chosen] += 1;
       sink(Received {
         item: popped.item,
         lane: self.name(chosen),
@@ -373,6 +380,12 @@ impl<T, L: Lane, Y: Policy<L>> Receiver<T, L, Y> {
   ///
   /// [`RecvManyError::Ended`] once every lane the quota admits is closed and empty, and
   /// [`RecvManyError::EmptyQuota`] at once for a quota that admits no lane.
+  ///
+  /// # Panics
+  ///
+  /// Where the policy panics, or the waker of another task that this receive wakes, the panic
+  /// unwinds out of this call. Every item taken before it is already in `into`, and stays there for
+  /// a caller that catches the unwind; no other item, and no room, is lost.
   #[inline]
   pub fn recv_many<'a>(
     &'a self,
@@ -389,6 +402,10 @@ impl<T, L: Lane, Y: Policy<L>> Receiver<T, L, Y> {
 
   /// A batch, as [`recv_many`](Self::recv_many) takes it, without waiting: `Ok(0)` where nothing
   /// the quota admits is queued now.
+  ///
+  /// # Panics
+  ///
+  /// As [`recv_many`](Self::recv_many): the items taken before a panic stay in `into`.
   pub fn try_recv_many(
     &self,
     into: &mut Vec<Received<T, L>>,
@@ -412,6 +429,10 @@ impl<T, L: Lane, Y: Policy<L>> Receiver<T, L, Y> {
   }
 
   /// [`recv_many`](Self::recv_many), parking this thread while it waits.
+  ///
+  /// # Panics
+  ///
+  /// As [`recv_many`](Self::recv_many): the items taken before a panic stay in `into`.
   pub fn recv_many_blocking(
     &self,
     into: &mut Vec<Received<T, L>>,
@@ -441,6 +462,13 @@ impl<T, L: Lane, Y: Policy<L>> Receiver<T, L, Y> {
   /// }
   /// # Ok::<(), Box<dyn core::error::Error>>(())
   /// ```
+  ///
+  /// # Panics
+  ///
+  /// Where the policy panics, the panic unwinds out of this call before any item is taken. Where
+  /// the waker of another task panics as this receive wakes it, after the item was taken, the panic
+  /// unwinds out of this call and the item is dropped with it: [`recv_many`](Self::recv_many)
+  /// keeps such an item in its `into`. No room is lost either way.
   #[inline]
   pub fn recv(&self) -> Recv<'_, T, L, Y> {
     Recv {
@@ -451,6 +479,10 @@ impl<T, L: Lane, Y: Policy<L>> Receiver<T, L, Y> {
   }
 
   /// One item of any lane, where one is queued now.
+  ///
+  /// # Panics
+  ///
+  /// As [`recv`](Self::recv).
   pub fn try_recv(&self) -> Result<Option<Received<T, L>>, Ended> {
     let quota = Quota::up_to(1);
     let mut slot = None;
@@ -468,6 +500,10 @@ impl<T, L: Lane, Y: Policy<L>> Receiver<T, L, Y> {
   }
 
   /// [`recv`](Self::recv), parking this thread while it waits.
+  ///
+  /// # Panics
+  ///
+  /// As [`recv`](Self::recv).
   pub fn recv_blocking(&self) -> Result<Received<T, L>, Ended> {
     match self.try_recv()? {
       Some(received) => Ok(received),

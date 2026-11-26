@@ -83,6 +83,25 @@ impl<L: Lane, S: Copy> LaneView<L, S> {
     self
   }
 
+  /// [`with_lane`](Self::with_lane), by the lane's index: the channel builds its views without
+  /// calling into `Lane`.
+  #[must_use]
+  #[inline]
+  pub(crate) fn with_index(
+    mut self,
+    index: usize,
+    queued: usize,
+    oldest: Option<S>,
+    passed_over: u32,
+  ) -> Self {
+    self.readings.as_mut_slice()[index] = Some(Reading {
+      queued,
+      oldest,
+      passed_over,
+    });
+    self
+  }
+
   /// The lanes in the view, by priority.
   pub fn lanes(&self) -> impl Iterator<Item = L> + '_ {
     self
