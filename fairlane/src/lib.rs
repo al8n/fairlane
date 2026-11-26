@@ -23,6 +23,7 @@ pub use policy::{
   DEFAULT_MAX_WAIT, DEFAULT_PASS_LIMIT, DefaultPolicy, Elapsed, FirstOf, LaneView, PassLimit,
   Policy, Stamps, Strict,
 };
+pub use quota::Quota;
 
 /// `#[derive(Lane)]` for a fieldless enum: the lanes in declaration order, index 0 first.
 ///
@@ -57,10 +58,13 @@ pub use policy::{
 #[cfg_attr(docsrs, doc(cfg(feature = "derive")))]
 pub use fairlane_derive::Lane;
 
+pub mod choice;
+
 mod clock;
 mod lane;
 mod options;
 mod policy;
+mod quota;
 
 #[cfg(test)]
 mod testing;
