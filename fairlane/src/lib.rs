@@ -14,6 +14,7 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 pub use lane::{Lane, PerLane, Single};
+pub use options::{LaneOptions, Malformed, Options};
 
 /// `#[derive(Lane)]` for a fieldless enum: the lanes in declaration order, index 0 first.
 ///
@@ -49,6 +50,7 @@ pub use lane::{Lane, PerLane, Single};
 pub use fairlane_derive::Lane;
 
 mod lane;
+mod options;
 
 /// Paths the derive's output names. Not public API.
 #[doc(hidden)]
