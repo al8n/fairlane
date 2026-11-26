@@ -5,7 +5,7 @@ name: Miri (Stacked Borrows)
 # Stacked Borrows, as `miri-tb.yml` is Tree Borrows, and for the same reasons: Miri sets its own
 # wall clock, so it is not part of the merge gate, and each model is its own workflow because the
 # two report different findings and are paused, and read, on their own. Read `miri-tb.yml` for why
-# no apple target is in the matrix, and why there is no `schedule` and no `-Dwarnings`.
+# the apple targets can be rows, and why there is no `schedule` and no `-Dwarnings`.
 #
 # Pause it (Actions > Miri (Stacked Borrows) > ... > Disable workflow) while you work, and turn it
 # back on before a release: `release.yml` requires both Miri workflows to be green on the commit
@@ -51,6 +51,8 @@ jobs:
           - powerpc64-unknown-linux-gnu
           - s390x-unknown-linux-gnu
           - riscv64gc-unknown-linux-gnu
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

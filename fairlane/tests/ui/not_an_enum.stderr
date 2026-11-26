@@ -1,0 +1,5 @@
+error: `Lane` can only be derived for an enum
+ --> tests/ui/not_an_enum.rs:2:8
+  |
+2 | struct Urgency;
+  |        ^^^^^^^

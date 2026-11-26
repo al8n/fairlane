@@ -1,0 +1,5 @@
+error: a lane takes its index from its place in the declaration: remove the discriminant
+ --> tests/ui/discriminant.rs:3:9
+  |
+3 |   One = 1,
+  |         ^

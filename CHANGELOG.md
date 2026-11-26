@@ -8,3 +8,6 @@ opens a new, empty `## Unreleased` above it. `ci/changelog.sh` checks this struc
 request, and `release.yml` publishes the released section as the GitHub Release notes.
 
 ## Unreleased
+
+- The first release: `fairlane`, a bounded channel of several lanes, and `fairlane-derive`, its
+  `#[derive(Lane)]`.

@@ -42,11 +42,11 @@ for san in $SANITIZERS; do
   case "$san" in
     memory | thread)
       RUSTFLAGS="-Z sanitizer=${san}" \
-        cargo -Zbuild-std test --tests --target "$TARGET" --all-features
+        cargo -Zbuild-std test -p fairlane --tests --target "$TARGET" --all-features
       ;;
     *)
       RUSTFLAGS="-Z sanitizer=${san}" \
-        cargo test --tests --target "$TARGET" --all-features
+        cargo test -p fairlane --tests --target "$TARGET" --all-features
       ;;
   esac
 done

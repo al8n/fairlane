@@ -1,0 +1,17 @@
+[package]
+name = "fairlane-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "fairlane's benches against flume, crossbeam-channel, async-channel, kanal and tokio's mpsc. A member of its own, so that none of them enters fairlane's test, loom or miri builds."
+
+[dependencies]
+fairlane = { workspace = true }
+
+[lints]
+workspace = true
+
+[lib]
+bench = false

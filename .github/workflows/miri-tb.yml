@@ -13,11 +13,9 @@ name: Miri (Tree Borrows)
 # releases. There is no `schedule`: re-interpreting unchanged code re-proves what the push did.
 #
 # Every cell runs on `ubuntu-latest`. Miri interprets a TARGET, and the host only has to build for
-# it. No apple target is in the matrix, and that is deliberate: criterion depends on `alloca`,
-# whose build script compiles C, and a Linux host cannot do that for an apple target. A crate that
-# moves its benches into a workspace member, so that criterion is out of `cargo miri test`'s graph,
-# can add `x86_64-apple-darwin` and `aarch64-apple-darwin` as rows; one that keeps criterion in the
-# root package can run `aarch64-apple-darwin` on `macos-latest`, at the price of a macOS queue here.
+# it. The benches and criterion are in the `fairlane-bench` member, out of `cargo miri test -p
+# fairlane`'s graph, so no build script compiles C for the target and the apple targets are rows
+# too.
 #
 # `-Dwarnings` is not set, unlike `ci.yml`: this lane runs on nightly, whose lint set moves under
 # an unchanged crate, and what it reports is undefined behaviour and not lints.
@@ -64,6 +62,8 @@ jobs:
           - powerpc64-unknown-linux-gnu
           - s390x-unknown-linux-gnu
           - riscv64gc-unknown-linux-gnu
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
