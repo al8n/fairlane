@@ -38,12 +38,9 @@ cargo miri setup
 
 export MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-disable-isolation -Zmiri-symbolic-alignment-check -Zmiri-tree-borrows"
 
-# Two passes, the two ends of the feature range: everything on, then nothing on. The second is the
-# core tier, where code gated on `not(feature = "std")` lives and `--all-features` never compiles
-# it. Add a pass for any feature that gates `unsafe` code these two do not cover together.
-#
-# No `--all-targets`: it would interpret the criterion benches, which are measurement code and not
-# code under test. The default selection runs the unit tests, the integration tests and the
-# doctests, and only builds the examples.
-cargo miri test --target "$TARGET" --all-features
-cargo miri test --target "$TARGET" --no-default-features
+# fairlane's unit tests: the ring, the remaining-capacity word, the reserves and the permits, and
+# the channel's smoke tests. Its only `unsafe` is the ring's, and every test that reaches it is a
+# unit test. Suites that only repeat the sequential laws over many random seeds carry
+# `#[cfg_attr(miri, ignore)]`: interpreting them re-proves what one seed proves. The derive and the
+# bench member hold no `unsafe`.
+cargo miri test -p fairlane --lib --target "$TARGET" --all-features

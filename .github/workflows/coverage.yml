@@ -78,8 +78,8 @@ jobs:
           tool: cargo-llvm-cov
       # No `--tests` next to `--doctests`: cargo-llvm-cov refuses the pair. `--doctests` alone runs
       # the default set (unit tests and `tests/`) as well as the doctests.
-      - name: cargo llvm-cov --all-features --doctests
-        run: cargo llvm-cov --all-features --doctests --lcov --output-path lcov.info
+      - name: cargo llvm-cov --workspace --all-features --doctests
+        run: cargo llvm-cov --workspace --exclude fairlane-bench --all-features --doctests --lcov --output-path lcov.info
       - name: A report was actually written
         run: |
           if [ ! -s lcov.info ]; then

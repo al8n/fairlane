@@ -1,0 +1,27 @@
+[package]
+name = "fairlane"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://docs.rs/fairlane"
+description = "A bounded multi-lane MPMC channel: a bound per lane, an anti-starvation policy, batched receives, and both awaited and blocking doors."
+
+[features]
+default = []
+
+[lints]
+workspace = true
+
+# Without `bench = false`, `cargo bench` also builds the lib under libtest's bench harness.
+[lib]
+bench = false
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

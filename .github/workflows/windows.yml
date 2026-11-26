@@ -87,9 +87,9 @@ jobs:
       # The same two commands as `ci.yml`'s `clippy`, repeated because the files cannot share
       # them. A lint gate that holds in one copy and not the others is the drift a split invites.
       - name: cargo hack clippy --each-feature --tests
-        run: cargo hack clippy --each-feature --tests --keep-going -- -D warnings
+        run: cargo hack clippy --workspace --each-feature --tests --keep-going -- -D warnings
       - name: cargo clippy --all-features --all-targets
-        run: cargo clippy --all-features --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
 
   build:
     name: build
@@ -119,7 +119,7 @@ jobs:
         with:
           tool: cargo-hack
       - name: cargo hack build --feature-powerset
-        run: cargo hack build --feature-powerset --keep-going
+        run: cargo hack build --workspace --feature-powerset --exclude-features loom --keep-going
 
   test:
     name: test
@@ -149,4 +149,4 @@ jobs:
         with:
           tool: cargo-hack
       - name: cargo hack test --feature-powerset
-        run: cargo hack test --feature-powerset --keep-going
+        run: cargo hack test --workspace --feature-powerset --exclude-features loom --keep-going

@@ -67,5 +67,5 @@ jobs:
         run: rustup update stable --no-self-update && rustup default stable
       # `--all-features` because cargo SKIPS a bench whose `required-features` are unmet instead of
       # failing it, and a skipped bench is a green job over a bench that never ran.
-      - name: cargo bench --all-features -- --test
-        run: cargo bench --all-features -- --test
+      - name: cargo bench -p fairlane-bench --all-features -- --test
+        run: cargo bench -p fairlane-bench --all-features -- --test
