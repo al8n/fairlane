@@ -88,7 +88,8 @@ impl<P: Lane> Quota<P> {
     self.admits_at(lane.index())
   }
 
-  /// [`at_most_for`](Self::at_most_for), by index. An index past the lanes has no cap.
+  /// [`at_most_for`](Self::at_most_for), by index. An index past the lanes answers 0: it admits
+  /// nothing.
   #[inline]
   pub(crate) fn at_most_at(&self, index: usize) -> usize {
     self

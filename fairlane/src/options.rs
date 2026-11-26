@@ -80,6 +80,12 @@ impl<P: Lane> Options<P> {
     self
   }
 
+  /// The options of lane `index`.
+  #[inline]
+  pub(crate) fn lane_at(&self, index: usize) -> &LaneOptions {
+    self.lanes.at(index)
+  }
+
   /// Whether lane `index` is express: its options' word, else its declaration's.
   #[inline]
   pub(crate) fn is_express_at(&self, index: usize) -> bool {
