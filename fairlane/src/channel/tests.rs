@@ -216,6 +216,49 @@ fn disconnect_drops_every_item_under_its_own_catch() {
   assert_eq!(drops.load(SeqCst), 4);
 }
 
+/// A payload whose own drop panics.
+struct Bomb;
+
+impl Drop for Bomb {
+  fn drop(&mut self) {
+    panic!("a panic payload whose drop panics");
+  }
+}
+
+/// Counts its drops, and panics in its drop with a payload whose drop panics too.
+struct Volatile(StdArc<AtomicUsize>);
+
+impl Drop for Volatile {
+  fn drop(&mut self) {
+    self.0.fetch_add(1, SeqCst);
+    std::panic::panic_any(Bomb);
+  }
+}
+
+/// Both drains of the last receiver's drop, the lookahead's and the rings', drop every item, though
+/// each destructor panics with a payload whose own drop panics.
+#[test]
+fn disconnect_survives_a_payload_whose_drop_panics() {
+  use crate::testing::Three;
+
+  let drops = StdArc::new(AtomicUsize::new(0));
+  let options = Options::from_fn(|_| LaneOptions::new(cap(2)));
+  let (tx, rx) = channel::<Volatile, Three>(options).unwrap();
+  tx.try_send(Three::B, Volatile(drops.clone())).unwrap();
+  tx.try_send(Three::C, Volatile(drops.clone())).unwrap();
+  tx.try_send(Three::C, Volatile(drops.clone())).unwrap();
+  let taken = rx.try_recv().unwrap().unwrap();
+  assert_eq!(
+    taken.lane(),
+    Three::B,
+    "and C's oldest item is in the lookahead"
+  );
+  std::mem::forget(taken);
+  drop(rx);
+  assert_eq!(drops.load(SeqCst), 2, "both items left were dropped");
+  assert_eq!(tx.snapshot().received(Three::C), 2);
+}
+
 #[test]
 fn snapshot_reads_each_lane() {
   let (tx, rx) = bounded::<u32>(cap(4)).unwrap();
