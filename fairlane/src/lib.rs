@@ -10,8 +10,17 @@ compile_error!(
   "fairlane needs 64-bit atomics: a ring position, which is an item's ordinal, is an `AtomicU64`"
 );
 
+#[cfg(feature = "test-util")]
+#[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
+pub use clock::ManualClock;
+pub use clock::{Clock, Moment, Monotonic};
 pub use lane::{Lane, PerLane, Single};
 pub use options::{LaneOptions, Malformed, Options};
+pub use policy::{
+  DEFAULT_MAX_WAIT, DEFAULT_PASS_LIMIT, DefaultPolicy, Elapsed, FirstOf, LaneView, PassLimit,
+  Policy, Stamps, Strict,
+};
+pub use quota::Quota;
 
 /// `#[derive(Lane)]` for a fieldless enum: the lanes in declaration order, index 0 first.
 ///
@@ -46,8 +55,16 @@ pub use options::{LaneOptions, Malformed, Options};
 #[cfg_attr(docsrs, doc(cfg(feature = "derive")))]
 pub use fairlane_derive::Lane;
 
+pub mod choice;
+
+mod clock;
 mod lane;
 mod options;
+mod policy;
+mod quota;
+
+#[cfg(test)]
+mod testing;
 
 /// Paths the derive's output names. Not public API.
 #[doc(hidden)]
