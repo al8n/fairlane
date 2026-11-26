@@ -55,11 +55,23 @@ fn ring_laps_over_a_buffer_larger_than_its_capacity() {
 #[test]
 fn ring_of_one() {
   let ring = Ring::<&str, ()>::new(1, false).unwrap();
-  assert_eq!(ring.mask, 0);
+  assert_eq!(ring.mask, 1, "a ring of capacity one has two cells");
   for round in 0..5_u64 {
     assert_eq!(ring.push("x", || ()), Ok(round));
     assert_eq!(ring.pop().unwrap().item, "x");
   }
+}
+
+/// A ring of capacity one takes a second push that holds no room: it lands in the second cell, and
+/// both items come out in order.
+#[test]
+fn ring_of_one_takes_a_push_beyond_its_capacity() {
+  let ring = Ring::<u32, ()>::new(1, false).unwrap();
+  assert_eq!(ring.push(1, || ()), Ok(0));
+  assert_eq!(ring.push(2, || ()), Ok(1));
+  assert_eq!(ring.pop().unwrap().item, 1);
+  assert_eq!(ring.pop().unwrap().item, 2);
+  assert!(ring.pop().is_none());
 }
 
 #[test]

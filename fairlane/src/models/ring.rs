@@ -76,6 +76,42 @@ fn mk2_a_pop_waits_for_a_claimed_cell() {
   });
 }
 
+/// Two pushes that hold no room, into a ring of capacity one, against a popper: the cells alone keep
+/// each push and pop apart, and each item is popped once. With one cell, the second push would read
+/// the first item's published sequence as its own free one and write while the popper reads.
+#[test]
+fn mk4_a_ring_of_one_needs_no_room_to_be_sound() {
+  model(|| {
+    let ring = Arc::new(Ring::<u32, ()>::new(1, false).unwrap());
+    let pushers: Vec<_> = [10, 20]
+      .into_iter()
+      .map(|item| {
+        let ring = ring.clone();
+        thread::spawn(move || ring.push(item, || ()).unwrap())
+      })
+      .collect();
+    let popper = {
+      let ring = ring.clone();
+      thread::spawn(move || {
+        let mut popped = Vec::new();
+        while popped.len() < 2 {
+          match ring.pop() {
+            Some(item) => popped.push(item.item),
+            None => thread::yield_now(),
+          }
+        }
+        popped
+      })
+    };
+    for pusher in pushers {
+      pusher.join().unwrap();
+    }
+    let mut popped = popper.join().unwrap();
+    popped.sort_unstable();
+    assert_eq!(popped, [10, 20]);
+  });
+}
+
 /// The next lap: two poppers, capacity 2, three items. The third is pushed on room a popper gave
 /// back, into a cell a slower popper of the previous lap may still be reading.
 #[test]

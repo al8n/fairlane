@@ -9,6 +9,11 @@
 //! - **A cell's sequence** says whose turn it is at that cell: `p` while it is free for the push of
 //!   position `p`; `p + 1` once that push has written it; `p + len` once the pop of `p` has read
 //!   it, which frees it for the push of the next lap.
+//! - **A ring has at least two cells.** Then the three values `p`, `p + 1` and `p + len` differ, so
+//!   a sequence names one turn of one position, and the cells alone keep every push and pop of a
+//!   cell apart, with or without the caller's room. With one cell, `p + 1` would both publish
+//!   position `p` and free the cell for position `p + 1`: a push that held no room could write the
+//!   cell while the pop of `p` still read it.
 //! - **A push** claims its position first, with one compare-and-swap on the tail; that instant
 //!   commits the item, and the position is its ordinal. The caller holds room for it (a permit),
 //!   so the position's cell has been popped, or is being popped, and the push waits only for that
@@ -38,6 +43,9 @@ use crate::sync::{AtomicU64, Ordering, Spin, UnsafeCell};
 
 /// The close mark: the top bit of the tail.
 const MARK: u64 = 1 << 63;
+
+/// The fewest cells a ring has (see the module's sequences).
+const MIN_CELLS: usize = 2;
 
 struct Cell<T> {
   sequence: AtomicU64,
@@ -72,7 +80,7 @@ impl<T, S: Copy> Ring<T, S> {
   /// A ring that holds `capacity` items, with a stamp beside each where `stamped`. `None` where
   /// `capacity`'s power of two overflows, or its cells cannot be laid out.
   pub(crate) fn new(capacity: usize, stamped: bool) -> Option<Self> {
-    let len = capacity.max(1).checked_next_power_of_two()?;
+    let len = capacity.max(MIN_CELLS).checked_next_power_of_two()?;
     let mask = u64::try_from(len).ok()?.checked_sub(1)?;
     if mask >= MARK {
       return None;
@@ -112,8 +120,8 @@ impl<T, S: Copy> Ring<T, S> {
   ///
   /// A stamped ring calls `stamp` once, just before the commit; an unstamped ring never calls it.
   ///
-  /// The caller holds room for the item. Without it the push would still be sound, and would wait
-  /// for a pop to free its cell.
+  /// The caller holds room for the item. Without it the push would still be sound, since a ring has
+  /// at least two cells, and would wait for a pop to free its cell.
   pub(crate) fn push(&self, item: T, stamp: impl FnOnce() -> S) -> Result<u64, T> {
     let stamp = self.stamps.is_some().then(stamp);
     let mut tail = self.tail.load(Ordering::Relaxed);
