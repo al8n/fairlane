@@ -116,7 +116,7 @@ pub(crate) struct LaneState<T, S> {
   pub(crate) ahead: AtomicUsize,
 }
 
-impl<T, S: Copy> LaneState<T, S> {
+impl<T, S> LaneState<T, S> {
   /// One unit of room back to the lane.
   #[inline]
   pub(crate) fn release(&self) {

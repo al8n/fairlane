@@ -301,7 +301,7 @@ impl<L: Lane> Policy<L> for PassLimit<L> {
 /// more overdue.
 ///
 /// The waits are live: [`set_max_wait`](Self::set_max_wait) takes effect at the next choice.
-pub struct Elapsed<L: Lane, C: Clock = Monotonic> {
+pub struct Elapsed<L: Lane, C = Monotonic> {
   /// One wait per lane, in nanoseconds; `u64::MAX` is no wait.
   max_waits: PerLane<AtomicU64, L>,
   clock: C,
@@ -323,7 +323,7 @@ impl<L: Lane> Elapsed<L> {
   }
 }
 
-impl<L: Lane, C: Clock> Elapsed<L, C> {
+impl<L: Lane, C> Elapsed<L, C> {
   /// `max_wait` for every lane, on `clock`.
   pub fn with_clock(max_wait: Duration, clock: C) -> Self {
     let nanos = wait_nanos(Some(max_wait));
@@ -366,7 +366,7 @@ impl<L: Lane> Default for Elapsed<L> {
   }
 }
 
-impl<L: Lane, C: Clock + fmt::Debug> fmt::Debug for Elapsed<L, C> {
+impl<L: Lane, C: fmt::Debug> fmt::Debug for Elapsed<L, C> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     let waits = PerLane::<Option<Duration>, L>::from_array(Array::from_fn(|index| {
       let nanos = self.max_waits.at(index).load(Ordering::Relaxed);
