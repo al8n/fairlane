@@ -17,6 +17,7 @@
 #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
 pub use clock::ManualClock;
 pub use clock::{Clock, Moment, Monotonic};
+pub use error::{Closed, Ended, SendError, TryReserveError, TrySendError};
 pub use lane::{Lane, PerLane, Single};
 pub use options::{LaneOptions, Malformed, Options};
 pub use policy::{
@@ -61,6 +62,7 @@ pub use fairlane_derive::Lane;
 pub mod choice;
 
 mod clock;
+mod error;
 mod lane;
 mod options;
 mod policy;
