@@ -19,14 +19,23 @@ receives, and both awaited and blocking doors.
 
 ## Introduction
 
-`fairlane` is a channel whose capacity is divided into lanes. A lane is a priority class with its
-own queue and its own bound, so a full lane never holds a sender of another lane.
+`fairlane` is a bounded MPMC channel whose capacity is divided into lanes. A lane is a priority
+class with its own queue and its own bound, so a full lane never holds a sender of another lane.
 
 - **Lanes are your own enum.** `#[derive(Lane)]` numbers them in declaration order; lane 0 is
   served first.
-- **Every lane has a bound,** and the capacity has no default: it is a required decision.
-
-The channel, its policies and its batched receive arrive in later commits of 0.1.
+- **Every lane has a bound,** and a capacity has no default: it is a required decision.
+- **Express lanes** come first in the enum and are always served first; the policy never sees
+  them.
+- **A policy against starvation.** The default owes a lane service once it has been passed over 8
+  times, or once its oldest item has waited 2 seconds, whichever comes first. Both numbers can be
+  changed per lane while the channel runs.
+- **Batched receives.** `recv_many` takes up to a limit in one call, choosing lane by lane for
+  each item, with an optional limit per lane and a range of lanes it admits.
+- **Every wait has three forms:** awaited (`send`, `reserve`, `recv`, `recv_many`), blocking
+  (`send_blocking`, …), and one that never waits (`try_send`, …). Any runtime will do, or none.
+- **Two steps where they help.** `reserve` waits for room and hands back a permit; the item is
+  built and committed only once the room is there.
 
 ## Installation
 
@@ -35,52 +44,108 @@ The channel, its policies and its batched receive arrive in later commits of 0.1
 fairlane = { version = "0.1", features = ["derive"] }
 ```
 
+## Quick start
+
+```rust
+use core::num::NonZeroUsize;
+
+use fairlane::{Lane, LaneOptions, Options, Quota};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Lane)]
+enum Urgency {
+  #[fairlane(express)]
+  Control,
+  Interactive,
+  Batch,
+}
+
+let options = Options::from_fn(|lane| match lane {
+  Urgency::Control => LaneOptions::new(NonZeroUsize::new(8).unwrap()),
+  Urgency::Interactive => LaneOptions::new(NonZeroUsize::new(64).unwrap()),
+  Urgency::Batch => LaneOptions::new(NonZeroUsize::new(1024).unwrap()),
+});
+let (tx, rx) = fairlane::channel::<&str, Urgency>(options).unwrap();
+
+tx.send_blocking(Urgency::Batch, "reindex").unwrap();
+tx.send_blocking(Urgency::Interactive, "search").unwrap();
+tx.send_blocking(Urgency::Control, "pause").unwrap();
+
+let mut batch = Vec::new();
+rx.recv_many_blocking(&mut batch, Quota::up_to(8)).unwrap();
+let items: Vec<&str> = batch.into_iter().map(|received| received.into_item()).collect();
+assert_eq!(items, ["pause", "search", "reindex"]);
+```
+
+A channel of one lane is `bounded`. The awaited forms, and a permit:
+
+```rust
+use fairlane::{Receiver, Sender, Single};
+
+async fn produce(tx: Sender<u64>) {
+  for item in 0..100 {
+    // Waits for room; the item is committed only once a unit of room is held.
+    let Ok(permit) = tx.reserve(Single).await else { return };
+    if permit.send(item).is_err() {
+      return;
+    }
+  }
+}
+
+async fn consume(rx: Receiver<u64>) -> u64 {
+  let mut batch = Vec::new();
+  let mut sum = 0;
+  while rx.recv_many(&mut batch, 32).await.is_ok() {
+    sum += batch.drain(..).map(|received| received.into_item()).sum::<u64>();
+  }
+  sum
+}
+```
+
+Each received item carries its lane and its ordinal, its place in that lane: 0, 1, 2 and on, with
+no gap.
+
+## Policies
+
+| Policy | A lane is owed service |
+| --- | --- |
+| `Strict` | never: strict priority |
+| `PassLimit` | once it has been passed over a number of times |
+| `Elapsed` | once its oldest item has waited longer than a duration, by the policy's clock |
+| `FirstOf<A, B>` | once either `A` or `B` says so |
+| `DefaultPolicy` | `FirstOf<PassLimit, Elapsed>`, with `DEFAULT_PASS_LIMIT` (8) and `DEFAULT_MAX_WAIT` (2 s) |
+
+`channel_with(options, policy)` takes any of them, or your own `Policy`. A policy is pure: it reads
+a view of the waiting lanes and names the one owed, or none.
+
 ## Features
 
 | Feature | Default | What it adds |
 | --- | --- | --- |
 | `derive` | no | `#[derive(Lane)]`, re-exported beside the trait |
 | `serde` | no | `Serialize` and `Deserialize` for `LaneOptions`, `Options` and `PerLane`: a map keyed by each lane's name, every lane required |
+| `either` | no | `Policy` for `either::Either`: one policy of two, chosen at run time |
+| `test-util` | no | `ManualClock`, a clock a test sets |
 
-The crate needs the standard library: it parks threads. It needs 64-bit atomics.
+The crate needs the standard library: it parks threads. It needs 64-bit atomics. Rust 1.85 is the
+MSRV.
 
-## Quick start
+## Verification
 
-```rust
-use core::num::NonZeroUsize;
+- Every law is checked against a sequential model of the channel: the unit laws, and random
+  walks that compare the channel with the model step by step.
+- Concurrent histories on real threads are checked for linearizability against the same model.
+- The waits and wakes are modelled under [loom](https://crates.io/crates/loom), every actor its
+  own thread.
+- The ring, the only `unsafe` code, runs under Miri with both Tree Borrows and Stacked Borrows.
+- The derive's refusals are compile-fail tests.
 
-use fairlane::{Lane, LaneOptions, Options};
+## Benchmarks
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum Urgency {
-  Interactive,
-  Batch,
-}
+`fairlane-bench`, a member of the workspace that is never published, compares fairlane with
+flume, crossbeam-channel, async-channel, kanal and tokio's mpsc:
 
-impl Lane for Urgency {
-  type N = typenum::U2;
-
-  fn index(self) -> usize {
-    self as usize
-  }
-
-  fn from_index(index: usize) -> Option<Self> {
-    [Self::Interactive, Self::Batch].get(index).copied()
-  }
-
-  fn as_str(self) -> &'static str {
-    match self {
-      Self::Interactive => "interactive",
-      Self::Batch => "batch",
-    }
-  }
-}
-
-let options = Options::<Urgency>::from_fn(|lane| match lane {
-  Urgency::Interactive => LaneOptions::new(NonZeroUsize::new(64).unwrap()),
-  Urgency::Batch => LaneOptions::new(NonZeroUsize::new(1024).unwrap()),
-});
-assert_eq!(options.lane(Urgency::Batch).capacity().get(), 1024);
+```bash
+cargo bench -p fairlane-bench
 ```
 
 #### License
