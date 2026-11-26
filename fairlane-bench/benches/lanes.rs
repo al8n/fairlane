@@ -45,7 +45,6 @@ fn saturate<L: Lane, Y: fairlane::Policy<L>>(
 ) where
   Sender<u64, L, Y>: Send,
   Receiver<u64, L, Y>: Send,
-  L: Sync,
 {
   thread::scope(|scope| {
     for _ in 0..senders {
