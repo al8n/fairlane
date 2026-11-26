@@ -194,7 +194,7 @@ impl<T, L: Lane, S: Copy> Model<T, L, S> {
       }
       Waiter::Closed => {
         self.waiters.remove(&waiter);
-        Some(Err(Closed(())))
+        Some(Err(Closed))
       }
     }
   }

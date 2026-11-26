@@ -2,7 +2,7 @@ use core::fmt;
 
 /// Nothing more is taken in: the channel is closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Closed(pub(crate) ());
+pub struct Closed;
 
 impl fmt::Display for Closed {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -15,7 +15,7 @@ impl core::error::Error for Closed {}
 /// Nothing the receive admits is left, and none can come: every lane it admits is closed and
 /// empty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Ended(pub(crate) ());
+pub struct Ended;
 
 impl fmt::Display for Ended {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -27,7 +27,7 @@ impl core::error::Error for Ended {}
 
 /// A send that failed because the channel is closed, with the item it could not commit.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SendError<T>(pub(crate) T);
+pub struct SendError<T>(pub T);
 
 impl<T> SendError<T> {
   /// The item that was not sent.

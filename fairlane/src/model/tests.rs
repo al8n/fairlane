@@ -93,8 +93,8 @@ fn model_close_settles_grants_not_taken_up() {
   let w2 = waiting(model.reserve(Three::B));
   model.drop_permit(first);
   model.close_lane(Three::B.index());
-  assert_eq!(model.verdict(w1), Some(Err(Closed(()))));
-  assert_eq!(model.verdict(w2), Some(Err(Closed(()))));
+  assert_eq!(model.verdict(w1), Some(Err(Closed)));
+  assert_eq!(model.verdict(w2), Some(Err(Closed)));
   let counts = model.counts(Three::B);
   assert_eq!((counts.reserved, counts.remaining), (0, 1));
   assert_eq!(model.reserve(Three::B), Reserved::Closed);
@@ -309,7 +309,7 @@ fn walk(seed: u64, steps: usize) {
           if of == lane {
             assert_eq!(
               model.verdict(waiter),
-              Some(Err(Closed(()))),
+              Some(Err(Closed)),
               "C1: a waiter of a closed lane, {}",
               context()
             );
