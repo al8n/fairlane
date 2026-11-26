@@ -8,7 +8,7 @@ use hybrid_array::Array;
 use crate::{
   arrivals::Arrivals,
   choice::Choice,
-  lane::{Lane, PerLane, Single, lane_count},
+  lane::{Lane, PerLane, Single, index_of, lane_count},
   options::{LaneOptions, Malformed, Options},
   policy::{DefaultPolicy, Policy},
   receiver::Receiver,
@@ -175,9 +175,12 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     })
   }
 
+  /// The index of `lane`: one call into [`Lane::index`], checked against `L::N`. A door resolves
+  /// its lane once and carries the index to its commit or its refund, so a `Lane` whose answer
+  /// changes cannot send a permit's item into a lane it holds no room in.
   #[inline]
-  pub(crate) fn lane(&self, lane: L) -> &LaneState<T, Y::Stamp> {
-    self.lanes.get(lane)
+  pub(crate) fn resolve(&self, lane: L) -> usize {
+    index_of(lane)
   }
 
   #[inline]
@@ -208,10 +211,10 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     &self.policy
   }
 
-  /// Commits `item` through a permit of `lane`, or hands it back where the lane closed after the
-  /// permit was granted; the permit's room is let go then.
-  pub(crate) fn commit(&self, lane: L, item: T) -> Result<(), T> {
-    let state = self.lane(lane);
+  /// Commits `item` through a permit of lane `index`, or hands it back where the lane closed after
+  /// the permit was granted; the permit's room is let go then.
+  pub(crate) fn commit(&self, index: usize, item: T) -> Result<(), T> {
+    let state = self.lane_at(index);
     match state.ring.push(item, || self.policy.stamp()) {
       Ok(_) => {
         state.arrivals.wake_one();

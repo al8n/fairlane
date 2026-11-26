@@ -280,6 +280,7 @@ fn shared_state_holds_no_item_inline() {
   );
 }
 
+mod contracts;
 mod differential;
 #[cfg(feature = "test-util")]
 mod differential_lanes;

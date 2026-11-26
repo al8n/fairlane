@@ -166,12 +166,38 @@ pub(crate) const fn lane_count<L: Lane>() -> usize {
   <L::N as Unsigned>::USIZE
 }
 
+/// `lane`'s index, checked against `L::N`: the one call into `Lane::index` a door makes, so that
+/// everything the door does after it names one lane.
+///
+/// # Panics
+///
+/// Only for a hand-written [`Lane`] whose `index` is not below `N`.
+#[inline]
+pub(crate) fn index_of<L: Lane>(lane: L) -> usize {
+  let index = lane.index();
+  if index < lane_count::<L>() {
+    index
+  } else {
+    broken_index::<L>(index)
+  }
+}
+
 #[cold]
 #[inline(never)]
 fn broken_lane<L: Lane>(index: usize) -> ! {
   panic!(
     "`{}::from_index({index})` is `None` below its `Lane::N`, which breaks `Lane`'s contract",
     core::any::type_name::<L>()
+  )
+}
+
+#[cold]
+#[inline(never)]
+fn broken_index<L: Lane>(index: usize) -> ! {
+  panic!(
+    "`{}::index()` answered {index}, not below its `Lane::N` ({}), which breaks `Lane`'s contract",
+    core::any::type_name::<L>(),
+    lane_count::<L>()
   )
 }
 

@@ -51,8 +51,14 @@ impl<T, L: Lane, Y: Policy<L>> Sender<T, L, Y> {
   /// grant not yet taken up.
   #[inline]
   pub fn reserve(&self, lane: L) -> Reserve<'_, T, L, Y> {
+    self.reserve_at(self.shared.resolve(lane), lane)
+  }
+
+  #[inline]
+  fn reserve_at(&self, index: usize, lane: L) -> Reserve<'_, T, L, Y> {
     Reserve {
       shared: &self.shared,
+      index,
       lane,
       wait: Wait::Start,
     }
@@ -61,8 +67,12 @@ impl<T, L: Lane, Y: Policy<L>> Sender<T, L, Y> {
   /// Room in `lane` now, or why not: [`Full`](TryReserveError::Full) where it has none, or where
   /// an earlier reserve waits for it.
   pub fn try_reserve(&self, lane: L) -> Result<Permit<'_, T, L, Y>, TryReserveError> {
-    match self.shared.lane(lane).remaining.try_take() {
-      Ok(()) => Ok(Permit::new(&self.shared, lane)),
+    self.try_reserve_at(self.shared.resolve(lane), lane)
+  }
+
+  fn try_reserve_at(&self, index: usize, lane: L) -> Result<Permit<'_, T, L, Y>, TryReserveError> {
+    match self.shared.lane_at(index).remaining.try_take() {
+      Ok(()) => Ok(Permit::new(&self.shared, index, lane)),
       Err(Refusal::Busy) => Err(TryReserveError::Full),
       Err(Refusal::Closed) => Err(TryReserveError::Closed),
     }
@@ -92,18 +102,21 @@ impl<T, L: Lane, Y: Policy<L>> Sender<T, L, Y> {
   /// # Ok::<(), fairlane::Malformed>(())
   /// ```
   pub fn reserve_blocking(&self, lane: L) -> Result<Permit<'_, T, L, Y>, Closed> {
-    match self.try_reserve(lane) {
+    let index = self.shared.resolve(lane);
+    match self.try_reserve_at(index, lane) {
       Ok(permit) => Ok(permit),
       Err(TryReserveError::Closed) => Err(Closed),
-      Err(TryReserveError::Full) => park_on(self.reserve(lane)),
+      Err(TryReserveError::Full) => park_on(self.reserve_at(index, lane)),
     }
   }
 
   /// [`reserve`](Self::reserve), for a permit that owns its channel: an [`OwnedPermit`].
   #[inline]
   pub fn reserve_owned(&self, lane: L) -> ReserveOwned<T, L, Y> {
+    let index = self.shared.resolve(lane);
     ReserveOwned {
       sender: Some(self.clone()),
+      index,
       lane,
       wait: Wait::Start,
     }
@@ -122,7 +135,11 @@ impl<T, L: Lane, Y: Policy<L>> Sender<T, L, Y> {
   /// Commits `item` to `lane` now, or hands it back: `Full` where the lane has no room, or where
   /// an earlier reserve waits for it.
   pub fn try_send(&self, lane: L, item: T) -> Result<(), TrySendError<T>> {
-    match self.try_reserve(lane) {
+    self.try_send_at(self.shared.resolve(lane), lane, item)
+  }
+
+  fn try_send_at(&self, index: usize, lane: L, item: T) -> Result<(), TrySendError<T>> {
+    match self.try_reserve_at(index, lane) {
       Ok(permit) => permit
         .send(item)
         .map_err(|SendError(item)| TrySendError::Closed(item)),
@@ -133,10 +150,14 @@ impl<T, L: Lane, Y: Policy<L>> Sender<T, L, Y> {
 
   /// [`send`](Self::send), parking this thread while it waits.
   pub fn send_blocking(&self, lane: L, item: T) -> Result<(), SendError<T>> {
-    match self.try_send(lane, item) {
+    let index = self.shared.resolve(lane);
+    match self.try_send_at(index, lane, item) {
       Ok(()) => Ok(()),
       Err(TrySendError::Closed(item)) => Err(SendError(item)),
-      Err(TrySendError::Full(item)) => park_on(self.send(lane, item)),
+      Err(TrySendError::Full(item)) => park_on(Sending {
+        reserve: self.reserve_at(index, lane),
+        item: Some(item),
+      }),
     }
   }
 
@@ -212,14 +233,14 @@ pub(crate) enum Wait {
 }
 
 impl Wait {
-  /// Polls a reserve of `lane` to its verdict.
+  /// Polls a reserve of lane `index` to its verdict.
   pub(crate) fn poll<T, L: Lane, Y: Policy<L>>(
     &mut self,
     shared: &Shared<T, L, Y>,
-    lane: L,
+    index: usize,
     cx: &mut Context<'_>,
   ) -> Poll<Result<(), Closed>> {
-    let state = shared.lane(lane);
+    let state = shared.lane_at(index);
     loop {
       match self {
         Wait::Start => match state.remaining.try_take() {
@@ -254,9 +275,9 @@ impl Wait {
   }
 
   /// A reserve dropped: one that waits leaves the line, passing on a grant it holds.
-  pub(crate) fn leave<T, L: Lane, Y: Policy<L>>(&mut self, shared: &Shared<T, L, Y>, lane: L) {
+  pub(crate) fn leave<T, L: Lane, Y: Policy<L>>(&mut self, shared: &Shared<T, L, Y>, index: usize) {
     if let Wait::Waiting(listener) = mem::replace(self, Wait::Done) {
-      let state = shared.lane(lane);
+      let state = shared.lane_at(index);
       state.reserves.leave(&state.remaining, listener);
     }
   }
@@ -266,6 +287,8 @@ impl Wait {
 #[must_use = "a future does nothing unless polled"]
 pub struct Reserve<'a, T, L: Lane, Y: Policy<L>> {
   shared: &'a Shared<T, L, Y>,
+  /// The lane's index, resolved once by the door: every poll, the grant and a cancel name it.
+  index: usize,
   lane: L,
   wait: Wait,
 }
@@ -280,15 +303,15 @@ impl<'a, T, L: Lane, Y: Policy<L>> Future for Reserve<'a, T, L, Y> {
     let this = self.get_mut();
     this
       .wait
-      .poll(this.shared, this.lane, cx)
-      .map_ok(|()| Permit::new(this.shared, this.lane))
+      .poll(this.shared, this.index, cx)
+      .map_ok(|()| Permit::new(this.shared, this.index, this.lane))
   }
 }
 
 impl<T, L: Lane, Y: Policy<L>> Drop for Reserve<'_, T, L, Y> {
   #[inline]
   fn drop(&mut self) {
-    self.wait.leave(self.shared, self.lane);
+    self.wait.leave(self.shared, self.index);
   }
 }
 
@@ -305,6 +328,8 @@ impl<T, L: Lane, Y: Policy<L>> fmt::Debug for Reserve<'_, T, L, Y> {
 pub struct ReserveOwned<T, L: Lane, Y: Policy<L>> {
   /// `None` once the permit took it.
   sender: Option<Sender<T, L, Y>>,
+  /// As [`Reserve`]'s: resolved once by the door.
+  index: usize,
   lane: L,
   wait: Wait,
 }
@@ -320,11 +345,11 @@ impl<T, L: Lane, Y: Policy<L>> Future for ReserveOwned<T, L, Y> {
     let Some(sender) = &this.sender else {
       return Poll::Pending;
     };
-    match this.wait.poll(&sender.shared, this.lane, cx) {
+    match this.wait.poll(&sender.shared, this.index, cx) {
       Poll::Pending => Poll::Pending,
       Poll::Ready(Err(closed)) => Poll::Ready(Err(closed)),
       Poll::Ready(Ok(())) => match this.sender.take() {
-        Some(sender) => Poll::Ready(Ok(OwnedPermit::new(sender, this.lane))),
+        Some(sender) => Poll::Ready(Ok(OwnedPermit::new(sender, this.index, this.lane))),
         None => Poll::Pending,
       },
     }
@@ -335,7 +360,7 @@ impl<T, L: Lane, Y: Policy<L>> Drop for ReserveOwned<T, L, Y> {
   #[inline]
   fn drop(&mut self) {
     if let Some(sender) = &self.sender {
-      self.wait.leave(&sender.shared, self.lane);
+      self.wait.leave(&sender.shared, self.index);
     }
   }
 }
@@ -367,7 +392,7 @@ impl<T, L: Lane, Y: Policy<L>> Future for Sending<'_, T, L, Y> {
     let verdict = match this
       .reserve
       .wait
-      .poll(this.reserve.shared, this.reserve.lane, cx)
+      .poll(this.reserve.shared, this.reserve.index, cx)
     {
       Poll::Pending => return Poll::Pending,
       Poll::Ready(verdict) => verdict,
@@ -376,7 +401,7 @@ impl<T, L: Lane, Y: Policy<L>> Future for Sending<'_, T, L, Y> {
       return Poll::Pending;
     };
     Poll::Ready(match verdict {
-      Ok(()) => Permit::new(this.reserve.shared, this.reserve.lane).send(item),
+      Ok(()) => Permit::new(this.reserve.shared, this.reserve.index, this.reserve.lane).send(item),
       Err(Closed) => Err(SendError(item)),
     })
   }

@@ -9,13 +9,21 @@ use crate::{channel::Shared, error::SendError, lane::Lane, policy::Policy, sende
 #[must_use = "dropping a permit gives its room back unused"]
 pub struct Permit<'a, T, L: Lane, Y: Policy<L>> {
   shared: &'a Shared<T, L, Y>,
+  /// The lane's index, resolved once when the room was reserved: the commit and the refund go to
+  /// this lane whatever `Lane::index` answers later.
+  index: usize,
+  /// The lane as the caller named it, for [`lane`](Self::lane).
   lane: L,
 }
 
 impl<'a, T, L: Lane, Y: Policy<L>> Permit<'a, T, L, Y> {
   #[inline]
-  pub(crate) fn new(shared: &'a Shared<T, L, Y>, lane: L) -> Self {
-    Self { shared, lane }
+  pub(crate) fn new(shared: &'a Shared<T, L, Y>, index: usize, lane: L) -> Self {
+    Self {
+      shared,
+      index,
+      lane,
+    }
   }
 
   /// The lane the room is held in.
@@ -44,14 +52,14 @@ impl<'a, T, L: Lane, Y: Policy<L>> Permit<'a, T, L, Y> {
   #[inline]
   pub fn send(self, item: T) -> Result<(), SendError<T>> {
     let this = ManuallyDrop::new(self);
-    this.shared.commit(this.lane, item).map_err(SendError)
+    this.shared.commit(this.index, item).map_err(SendError)
   }
 }
 
 impl<T, L: Lane, Y: Policy<L>> Drop for Permit<'_, T, L, Y> {
   #[inline]
   fn drop(&mut self) {
-    self.shared.lane(self.lane).release();
+    self.shared.lane_at(self.index).release();
   }
 }
 
@@ -67,14 +75,17 @@ impl<T, L: Lane, Y: Policy<L>> fmt::Debug for Permit<'_, T, L, Y> {
 pub struct OwnedPermit<T, L: Lane, Y: Policy<L>> {
   /// `None` once sent.
   sender: Option<Sender<T, L, Y>>,
+  /// As [`Permit`]'s: resolved once, when the room was reserved.
+  index: usize,
   lane: L,
 }
 
 impl<T, L: Lane, Y: Policy<L>> OwnedPermit<T, L, Y> {
   #[inline]
-  pub(crate) fn new(sender: Sender<T, L, Y>, lane: L) -> Self {
+  pub(crate) fn new(sender: Sender<T, L, Y>, index: usize, lane: L) -> Self {
     Self {
       sender: Some(sender),
+      index,
       lane,
     }
   }
@@ -88,7 +99,7 @@ impl<T, L: Lane, Y: Policy<L>> OwnedPermit<T, L, Y> {
   /// [`Permit::send`], for an owned permit. Its sender goes once the item is committed.
   pub fn send(mut self, item: T) -> Result<(), SendError<T>> {
     match self.sender.take() {
-      Some(sender) => Permit::new(sender.shared(), self.lane).send(item),
+      Some(sender) => Permit::new(sender.shared(), self.index, self.lane).send(item),
       None => Err(SendError(item)),
     }
   }
@@ -98,7 +109,7 @@ impl<T, L: Lane, Y: Policy<L>> Drop for OwnedPermit<T, L, Y> {
   #[inline]
   fn drop(&mut self) {
     if let Some(sender) = self.sender.take() {
-      sender.shared().lane(self.lane).release();
+      sender.shared().lane_at(self.index).release();
     }
   }
 }
