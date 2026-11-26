@@ -33,6 +33,7 @@ pub use policy::{
   Policy, Stamps, Strict,
 };
 pub use quota::Quota;
+pub use snapshot::Snapshot;
 
 /// `#[derive(Lane)]` for a fieldless enum: the lanes in declaration order, index 0 first.
 ///
@@ -81,6 +82,7 @@ mod remaining;
 mod reserves;
 #[allow(unsafe_code)]
 mod ring;
+mod snapshot;
 mod sync;
 
 #[cfg(test)]
