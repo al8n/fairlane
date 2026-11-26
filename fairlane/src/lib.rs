@@ -13,6 +13,9 @@
 #![deny(unsafe_code)]
 #![cfg_attr(not(test), allow(dead_code))]
 
+#[cfg(all(loom, not(feature = "loom")))]
+compile_error!("`--cfg loom` builds fairlane on loom, which needs fairlane's `loom` feature");
+
 #[cfg(feature = "test-util")]
 #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
 pub use clock::ManualClock;
@@ -65,8 +68,10 @@ mod clock;
 mod error;
 mod lane;
 mod options;
+mod park;
 mod policy;
 mod quota;
+mod sync;
 
 #[cfg(test)]
 mod model;
