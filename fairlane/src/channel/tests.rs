@@ -268,6 +268,18 @@ fn a_capacity_that_cannot_be_held_is_refused() {
   );
 }
 
+/// The shared state holds no item inline, whatever the lane count: a channel of large items is
+/// built without moving them through the stack.
+#[test]
+fn shared_state_holds_no_item_inline() {
+  type Large = [u8; 1 << 16];
+  assert!(size_of::<Shared<Large, Single, DefaultPolicy<Single>>>() < size_of::<Large>());
+  assert!(
+    size_of::<Shared<Large, crate::testing::Three, DefaultPolicy<crate::testing::Three>>>()
+      < size_of::<Large>()
+  );
+}
+
 mod differential;
 #[cfg(feature = "test-util")]
 mod differential_lanes;

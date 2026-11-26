@@ -307,7 +307,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     let mut ahead = Vec::new();
     if let Some(choice) = &self.choice {
       let mut choice = lock(choice);
-      for (index, slot) in choice.ahead.as_mut_slice().iter_mut().enumerate() {
+      for (index, slot) in choice.ahead.iter_mut().enumerate() {
         if let Some(popped) = slot.take() {
           self.lanes.at(index).ahead.store(0, Ordering::Relaxed);
           ahead.push((index, popped.item));

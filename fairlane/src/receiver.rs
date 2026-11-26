@@ -184,7 +184,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
           continue;
         }
         let state = self.lane_at(index);
-        let ahead = &mut choice.ahead.as_mut_slice()[index];
+        let ahead = &mut choice.ahead[index];
         let mut holds = ahead.is_some() || !state.ring.is_empty();
         if holds && ahead.is_none() && stamps_matter && !self.is_express_at(index) {
           // The oldest stamp is read from the item itself: pop it ahead. Only this lock's holder
@@ -216,7 +216,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
             let mut lane_view = LaneView::new(now);
             for index in (0..count).filter(|&index| in_view(index)) {
               let state = self.lane_at(index);
-              let ahead = choice.ahead.as_slice()[index].as_ref();
+              let ahead = choice.ahead[index].as_ref();
               let queued = state
                 .ring
                 .committed()
@@ -245,7 +245,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
         break;
       }
       let state = self.lane_at(chosen);
-      let popped = match choice.ahead.as_mut_slice()[chosen].take() {
+      let popped = match choice.ahead[chosen].take() {
         Some(popped) => {
           state.ahead.store(0, Ordering::Relaxed);
           popped
@@ -275,9 +275,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
       None => {
         let ended = (0..count)
           .filter(|&index| quota.admits_at(index))
-          .all(|index| {
-            choice.ahead.as_slice()[index].is_none() && self.lane_at(index).ring.is_ended()
-          });
+          .all(|index| choice.ahead[index].is_none() && self.lane_at(index).ring.is_ended());
         if ended { Took::Ended } else { Took::Nothing }
       }
     }

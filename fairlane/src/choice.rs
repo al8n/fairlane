@@ -4,10 +4,8 @@
 //! serves lanes may call them too, so that one rule decides everywhere: build a view of the lanes
 //! that wait, [`choose`] one, and [`count`] the choice.
 
-use hybrid_array::Array;
-
 use crate::{
-  lane::{Lane, PerLane},
+  lane::{Lane, PerLane, lane_count},
   policy::{LaneView, Policy},
   ring::Popped,
 };
@@ -58,16 +56,19 @@ pub(crate) fn fits(held: usize, limit: usize, lane_limit: usize) -> bool {
 ///   read, and still queued until a choice takes it. Its room is not given back before then.
 ///
 /// While the lock is held only its holder pops, so a lane can gain items and cannot lose any.
+///
+/// The lookahead is on the heap, one slot per lane by index, so that the shared state holds no
+/// item inline: a channel of large items is built without moving them through the stack.
 pub(crate) struct Choice<T, L: Lane, S> {
   pub(crate) passed_over: PerLane<u32, L>,
-  pub(crate) ahead: PerLane<Option<Popped<T, S>>, L>,
+  pub(crate) ahead: Box<[Option<Popped<T, S>>]>,
 }
 
 impl<T, L: Lane, S> Choice<T, L, S> {
   pub(crate) fn new() -> Self {
     Self {
       passed_over: PerLane::filled(0),
-      ahead: PerLane::from_array(Array::from_fn(|_| None)),
+      ahead: (0..lane_count::<L>()).map(|_| None).collect(),
     }
   }
 }
