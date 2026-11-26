@@ -284,3 +284,5 @@ mod differential;
 #[cfg(feature = "test-util")]
 mod differential_lanes;
 mod lanes;
+mod linearizability;
+mod stress;

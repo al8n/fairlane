@@ -422,5 +422,7 @@ impl<T, L: Lane, S: Copy> Model<T, L, S> {
   }
 }
 
+pub(crate) mod check;
+
 #[cfg(test)]
 mod tests;

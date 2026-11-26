@@ -2,7 +2,10 @@
 
 use core::num::NonZeroUsize;
 
-use loom::thread;
+use loom::{
+  sync::{Arc, atomic::Ordering::SeqCst},
+  thread,
+};
 
 use super::model;
 use crate::{LaneOptions, Options, Quota, Receiver, Sender, Strict, channel_with, testing::Three};
@@ -195,6 +198,72 @@ fn mt3_a_later_commit_to_a_lower_lane_is_not_taken_first() {
     let tx = b.join().unwrap();
     let (first, rx) = receiver.join().unwrap();
     assert_eq!(first, 1, "B's item was taken while A's was queued");
+    drop((tx, rx));
+  });
+}
+
+/// Linearizability under loom: every interleaving of two threads, two operations each, over three
+/// lanes of capacity 1, is linearizable against the model.
+#[test]
+fn x2_small_histories_are_linearizable() {
+  use loom::sync::atomic::AtomicU64;
+
+  use crate::model::check::{Event, Op, linearizable, perform};
+
+  model(|| {
+    let options = Options::from_fn(|_| LaneOptions::new(NonZeroUsize::MIN));
+    let (tx, rx) = channel_with::<u64, Three, _>(options.clone(), Strict).unwrap();
+    let clock = Arc::new(AtomicU64::new(0));
+    let shapes = [
+      vec![
+        Op::Send {
+          lane: Three::B,
+          item: 1,
+        },
+        Op::Recv {
+          quota: Quota::up_to(2),
+        },
+      ],
+      vec![
+        Op::Send {
+          lane: Three::A,
+          item: 2,
+        },
+        Op::Recv {
+          quota: Quota::up_to(1),
+        },
+      ],
+    ];
+    let handles: Vec<_> = shapes
+      .into_iter()
+      .map(|ops| {
+        let (tx, rx, clock) = (tx.clone(), rx.clone(), clock.clone());
+        thread::spawn(move || {
+          ops
+            .into_iter()
+            .map(|op| {
+              let call = clock.fetch_add(1, SeqCst);
+              let answer = perform(&tx, &rx, &op);
+              let ret = clock.fetch_add(1, SeqCst);
+              Event {
+                call,
+                ret,
+                op,
+                answer,
+              }
+            })
+            .collect::<Vec<_>>()
+        })
+      })
+      .collect();
+    let history: Vec<Event<Three>> = handles
+      .into_iter()
+      .flat_map(|handle| handle.join().unwrap())
+      .collect();
+    assert!(
+      linearizable(&options, &Strict, &history),
+      "no order of the model explains {history:#?}"
+    );
     drop((tx, rx));
   });
 }
