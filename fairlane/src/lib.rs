@@ -69,6 +69,8 @@ mod policy;
 mod quota;
 
 #[cfg(test)]
+mod model;
+#[cfg(test)]
 mod testing;
 
 /// Paths the derive's output names. Not public API.
