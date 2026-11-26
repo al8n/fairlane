@@ -15,6 +15,18 @@
 //!   pop's last instructions before it writes.
 //! - **A pop** decides "empty" from the head and the tail alone. Where the tail is past the head, a
 //!   pusher has committed that position, and the pop waits for its last instructions.
+//! - **Orderings.** Every modification of the head and of the tail is a `SeqCst` read-modify-write,
+//!   and every head or tail read that decides "empty" is a `SeqCst` load, head first. So each such
+//!   load reads the last modification before it in the single total order `S`, and the two loads
+//!   of one decision sit in `S` in program order. Pops move the head past `h` only after reading a
+//!   tail above `h`, so head never passes tail at any point of `S`. A decision that reads `h` and
+//!   then `t` with `h >= t` therefore saw head and tail meet at the tail read's place in `S`: the
+//!   ring was empty at that instant. A `Relaxed` head read would not do: a `SeqCst` load keeps
+//!   later accesses after it but not an earlier relaxed one before it, so the head read could
+//!   return a head written by a pop after the tail read (head 5, tail 6; A reads tail 6; a push
+//!   moves it to 7; a pop moves head to 6; A reads head 6 and answers empty over a ring that held
+//!   {5}, then {5, 6}, then {6}). Neither loom 0.7 nor miri can show that reordering: neither
+//!   lets a load read a write that comes later in its interleaving.
 //! - **The close** sets the mark with one `fetch_or`. A push's compare-and-swap expects an unmarked
 //!   tail, so no push is committed after the mark; one that loses to it gets its item back.
 
@@ -65,25 +77,31 @@ impl<T, S: Copy> Ring<T, S> {
     if mask >= MARK {
       return None;
     }
+    // Both layouts first, so that one past `isize::MAX` is refused before anything is allocated.
+    // `try_reserve_exact` then refuses an allocation the system cannot give, so neither case
+    // panics or aborts.
     Layout::array::<Cell<T>>(len).ok()?;
     if stamped {
       Layout::array::<UnsafeCell<MaybeUninit<S>>>(len).ok()?;
     }
-    let cells = (0..=mask)
-      .map(|position| Cell {
-        sequence: AtomicU64::new(position),
-        value: UnsafeCell::new(MaybeUninit::uninit()),
-      })
-      .collect();
-    let stamps = stamped.then(|| {
-      (0..=mask)
-        .map(|_| UnsafeCell::new(MaybeUninit::uninit()))
-        .collect()
-    });
+    let mut cells = Vec::new();
+    cells.try_reserve_exact(len).ok()?;
+    cells.extend((0..=mask).map(|position| Cell {
+      sequence: AtomicU64::new(position),
+      value: UnsafeCell::new(MaybeUninit::uninit()),
+    }));
+    let stamps = if stamped {
+      let mut stamps = Vec::new();
+      stamps.try_reserve_exact(len).ok()?;
+      stamps.extend((0..=mask).map(|_| UnsafeCell::new(MaybeUninit::uninit())));
+      Some(stamps.into_boxed_slice())
+    } else {
+      None
+    };
     Some(Self {
       head: CachePadded::new(AtomicU64::new(0)),
       tail: CachePadded::new(AtomicU64::new(0)),
-      cells,
+      cells: cells.into_boxed_slice(),
       stamps,
       mask,
     })
@@ -139,12 +157,15 @@ impl<T, S: Copy> Ring<T, S> {
   }
 
   /// Takes the oldest item, or answers `None` where the ring is empty: head and tail meet.
+  ///
+  /// A receive that goes on to wait counts itself before it looks again, and a push reads that
+  /// count after it moves the tail, so a push that an empty answer here missed wakes it.
   pub(crate) fn pop(&self) -> Option<Popped<T, S>> {
     let spin = Spin::new();
-    let mut head = self.head.load(Ordering::Relaxed);
+    let mut head = self.head.load(Ordering::SeqCst);
     loop {
-      // Head first, then tail: a head read can be stale only low, so `head == tail` here means the
-      // ring was empty at the instant of the tail read.
+      // Head first, then tail, both `SeqCst`: `head == tail` here means head and tail met at the
+      // tail read's place in `S` (see the module's orderings).
       let tail = self.tail.load(Ordering::SeqCst) & !MARK;
       if head >= tail {
         return None;
@@ -155,7 +176,7 @@ impl<T, S: Copy> Ring<T, S> {
       if sequence == head + 1 {
         match self
           .head
-          .compare_exchange_weak(head, head + 1, Ordering::Relaxed, Ordering::Relaxed)
+          .compare_exchange_weak(head, head + 1, Ordering::SeqCst, Ordering::SeqCst)
         {
           Ok(_) => {
             let item = cell.value.with(|value| {
@@ -187,10 +208,10 @@ impl<T, S: Copy> Ring<T, S> {
         // The tail is past `head`, so a push owns `head` and has not published it yet, or the pop
         // of the previous lap has not handed the cell over. Either is a few instructions away.
         spin.wait();
-        head = self.head.load(Ordering::Relaxed);
+        head = self.head.load(Ordering::SeqCst);
       } else {
         // Another pop took `head`.
-        head = self.head.load(Ordering::Relaxed);
+        head = self.head.load(Ordering::SeqCst);
       }
     }
   }
@@ -206,14 +227,18 @@ impl<T, S: Copy> Ring<T, S> {
     self.tail.load(Ordering::SeqCst) & MARK != 0
   }
 
-  /// Whether head and tail meet: no item is committed and untaken.
+  /// Whether head and tail meet: no item is committed and untaken. Both reads are `SeqCst`, head
+  /// first, as `pop`'s (see the module's orderings).
   #[inline]
   pub(crate) fn is_empty(&self) -> bool {
-    let head = self.head.load(Ordering::Relaxed);
+    let head = self.head.load(Ordering::SeqCst);
     head >= self.tail.load(Ordering::SeqCst) & !MARK
   }
 
   /// Closed and empty. Once true it stays true: no push is committed after the mark.
+  ///
+  /// The head read may be `Relaxed`: once the mark is set the tail no longer moves, and head never
+  /// passes it, so a head read newer than the tail read only confirms the end.
   #[inline]
   pub(crate) fn is_ended(&self) -> bool {
     let head = self.head.load(Ordering::Relaxed);
@@ -221,19 +246,19 @@ impl<T, S: Copy> Ring<T, S> {
     tail & MARK != 0 && head >= tail & !MARK
   }
 
-  /// Every push ever committed.
+  /// Every push ever committed. A reading for the snapshot: no decision rests on it.
   #[inline]
   pub(crate) fn committed(&self) -> u64 {
     self.tail.load(Ordering::SeqCst) & !MARK
   }
 
-  /// Every pop ever claimed.
+  /// Every pop ever claimed. A reading for the snapshot: no decision rests on it.
   #[inline]
   pub(crate) fn received(&self) -> u64 {
     self.head.load(Ordering::Relaxed)
   }
 
-  /// Committed and not yet claimed by a pop.
+  /// Committed and not yet claimed by a pop. A reading for the snapshot: no decision rests on it.
   #[inline]
   pub(crate) fn queued(&self) -> u64 {
     let head = self.head.load(Ordering::Relaxed);

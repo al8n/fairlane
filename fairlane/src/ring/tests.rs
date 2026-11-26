@@ -141,6 +141,14 @@ fn ring_refuses_what_cannot_be_held() {
   assert!(Ring::<u8, [u8; 1 << 20]>::new(1 << 50, true).is_none());
 }
 
+/// 2^50 cells of 16 bytes: a layout that fits `isize`, and an allocation no system gives. Not
+/// under miri, which stops at an allocation it cannot make instead of failing it.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn ring_refuses_an_allocation_the_system_cannot_give() {
+  assert!(Ring::<u8, ()>::new(1 << 50, false).is_none());
+}
+
 /// Two pushers and two poppers on real threads. Room is counted as permits count it: a pusher
 /// takes a unit before it pushes, and a popper gives one back after its pop is complete.
 #[test]
@@ -211,5 +219,26 @@ fn ring_moves_items_between_threads() {
       .map(|(_, (_, sequence))| *sequence)
       .collect();
     assert_eq!(order, (0..per_pusher).collect::<Vec<_>>());
+  }
+}
+
+/// The empty decision, pinned: in a quiescent ring, "empty" is exactly "head meets tail", and a
+/// pop answers `None` exactly then. Its ordering (both reads `SeqCst`, head first) is argued in the
+/// module's comment: no test on one thread, nor loom, nor miri, can show a reordering of it.
+#[test]
+fn ring_answers_empty_only_where_head_meets_tail() {
+  let ring = Ring::<u32, ()>::new(4, false).unwrap();
+  let mut next = 0;
+  for round in 0..40 {
+    let pushes = round % 4;
+    for _ in 0..pushes {
+      ring.push(next, ()).unwrap();
+      next += 1;
+    }
+    for _ in 0..=pushes {
+      let meets = ring.received() == ring.committed();
+      assert_eq!(ring.is_empty(), meets);
+      assert_eq!(ring.pop().is_none(), meets);
+    }
   }
 }
