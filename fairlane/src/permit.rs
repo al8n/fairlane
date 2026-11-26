@@ -1,6 +1,8 @@
 use core::{fmt, mem::ManuallyDrop};
 
-use crate::{channel::Shared, error::SendError, lane::Lane, policy::Policy, sender::Sender};
+use crate::{
+  channel::Shared, error::SendError, lane::Lane, policy::Policy, sender::Sender, wake::wake,
+};
 
 /// Room held in one lane, borrowed from its sender. Its `send` commits an item there and never
 /// waits.
@@ -59,7 +61,7 @@ impl<'a, T, L: Lane, Y: Policy<L>> Permit<'a, T, L, Y> {
 impl<T, L: Lane, Y: Policy<L>> Drop for Permit<'_, T, L, Y> {
   #[inline]
   fn drop(&mut self) {
-    self.shared.lane_at(self.index).release();
+    wake(self.shared.lane_at(self.index).release());
   }
 }
 
@@ -109,7 +111,7 @@ impl<T, L: Lane, Y: Policy<L>> Drop for OwnedPermit<T, L, Y> {
   #[inline]
   fn drop(&mut self) {
     if let Some(sender) = self.sender.take() {
-      sender.shared().lane_at(self.index).release();
+      wake(sender.shared().lane_at(self.index).release());
     }
   }
 }

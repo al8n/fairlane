@@ -1,68 +1,52 @@
 //! A lane's waiting reserves: oldest first, and a unit that comes back is granted, not freed.
 //!
-//! Every decision is made under the reserve lock, and nothing foreign runs under it: an
-//! event-listener `notify` wakes a waker, and a listener's `discard` drops one, so both happen
-//! after the lock is let go. The lock holds two counts:
-//!
-//! - `waiting`: reserves in line that no grant has been decided for;
-//! - `granted`: grants decided and not yet taken up by their waiter.
-//!
-//! A grant's notification carries no verdict. A woken reserve reads its verdict from this state:
-//! `Closed` where the lane is closed, else one grant. A close settles every grant not yet taken
-//! up back into the remaining capacity, so a reserve that was granted and had not taken its grant
-//! when the close came resolves `Closed`.
-//!
-//! A grant decided for a waiter that leaves before its notification lands reaches nobody:
-//! `notify` answers 0, and the unit is released again from the top.
-//!
-//! `event.listen()` runs under the line lock: it inserts a listener and runs no foreign code. This
-//! assumes what wakers are expected to do: `wake` schedules its task and never polls it inline.
-//! event-listener runs wakers inside its own list lock, so a waker that polled inline would take
-//! that lock again on its first listener poll and deadlock event-listener by itself; taking
-//! `listen()` out of the line lock would therefore remove no deadlock.
+//! - **The line** is a [`Waiters`] queue under the lane's reserve lock. A release that finds a
+//!   reserve in line GRANTS the oldest one its unit by making it `Notified`, under the lock, and
+//!   `free` does not move. A close makes every reserve `Closed`, and settles each grant not yet
+//!   taken up back into the remaining capacity. A reserve reads its verdict from its own state, so
+//!   a wake carries nothing; a reserve that leaves reads what it holds, and passes a grant on or
+//!   gives up its place.
+//! - **The word's flags** change only under the lock, through the line's transitions in
+//!   [`remaining`](crate::remaining): `WAITING` is set exactly while a reserve is in line.
+//! - **No user code runs under the lock.** A waker is cloned before the lock is taken; one taken
+//!   out under it is woken or dropped after it is let go. A waker can do anything there, such as
+//!   drop another reserve of this lane, which takes this lock again.
+//! - **No user code runs while a place or a grant has no owner.** A reserve's [`Key`] stays in its
+//!   future across every waker clone, and leaves it only under the lock, in the step that frees its
+//!   place. Wakers a poll no longer needs go back to the caller in a [`Spare`], to be dropped once
+//!   the caller holds its permit.
 
-use event_listener::{Event, EventListener, IntoNotification, Listener};
-
-use crate::{
-  remaining::{CLOSED, Remaining, WAITING, free, word},
-  sync::{AtomicUsize, Mutex, Ordering, lock},
+use core::{
+  mem,
+  task::{Poll, Waker},
 };
 
+use crate::{
+  error::Closed,
+  remaining::{Back, CLOSED, Join, Refusal, Remaining, back, closed, join, left},
+  sync::{AtomicUsize, Mutex, Ordering, lock},
+  waiters::{Key, State, Waiters},
+  wake::{Spare, Wakes},
+};
+
+/// Where a reserve is.
+pub(crate) enum Wait {
+  Start,
+  /// In the line, or granted or closed and not yet told.
+  Waiting(Key),
+  Done,
+}
+
 pub(crate) struct Reserves {
-  line: Mutex<Line>,
-  event: Event,
+  line: Mutex<Waiters>,
   /// Reserves that wait and have not resolved: the snapshot's `senders_waiting`.
   parked: AtomicUsize,
-}
-
-#[derive(Default)]
-struct Line {
-  waiting: usize,
-  granted: usize,
-}
-
-/// What a reserve that found no free unit did.
-pub(crate) enum Begin {
-  /// A unit had come back: it is taken.
-  Granted,
-  /// It waits in line.
-  Waiting(EventListener),
-  Closed,
-}
-
-/// What a woken reserve learns.
-pub(crate) enum Verdict {
-  Granted,
-  Closed,
-  /// The wake carried no grant: it waits again.
-  Again(EventListener),
 }
 
 impl Reserves {
   pub(crate) fn new() -> Self {
     Self {
-      line: Mutex::new(Line::default()),
-      event: Event::new(),
+      line: Mutex::new(Waiters::new()),
       parked: AtomicUsize::new(0),
     }
   }
@@ -73,151 +57,180 @@ impl Reserves {
     self.parked.load(Ordering::SeqCst)
   }
 
-  /// A reserve whose `take` was refused: it takes a unit that came back meanwhile, or waits.
-  pub(crate) fn begin(&self, remaining: &Remaining) -> Begin {
-    let mut line = lock(&self.line);
-    match Self::queue(&mut line, remaining) {
-      Ok(false) => Begin::Granted,
-      Ok(true) => {
-        self.parked.fetch_add(1, Ordering::SeqCst);
-        Begin::Waiting(self.event.listen())
-      }
-      Err(()) => Begin::Closed,
+  /// Polls the reserve at `wait` to its verdict. Wakers it no longer needs go to `spare`, for the
+  /// caller to drop once it owns the verdict.
+  pub(crate) fn poll(
+    &self,
+    remaining: &Remaining,
+    wait: &mut Wait,
+    waker: &Waker,
+    spare: &mut Spare,
+  ) -> Poll<Result<(), Closed>> {
+    match wait {
+      Wait::Start => match remaining.try_take() {
+        Ok(()) => done(wait, Ok(())),
+        Err(Refusal::Closed) => done(wait, Err(Closed)),
+        Err(Refusal::Busy) => self.begin(remaining, wait, waker.clone(), spare),
+      },
+      Wait::Waiting(_) => self.again(wait, waker, spare),
+      // Polled after it resolved: the future's contract leaves this open, and it never wakes.
+      Wait::Done => Poll::Pending,
     }
   }
 
-  /// A waiting reserve was woken: its verdict, read from the line.
-  pub(crate) fn woken(&self, remaining: &Remaining) -> Verdict {
+  /// A reserve whose `take` was refused, with its waker's clone: it takes a unit that came back
+  /// meanwhile, or joins the line.
+  fn begin(
+    &self,
+    remaining: &Remaining,
+    wait: &mut Wait,
+    fresh: Waker,
+    spare: &mut Spare,
+  ) -> Poll<Result<(), Closed>> {
     let mut line = lock(&self.line);
-    if remaining.load() & CLOSED != 0 {
-      self.parked.fetch_sub(1, Ordering::SeqCst);
-      return Verdict::Closed;
-    }
-    if line.granted > 0 {
-      line.granted -= 1;
-      self.parked.fetch_sub(1, Ordering::SeqCst);
-      return Verdict::Granted;
-    }
-    match Self::queue(&mut line, remaining) {
-      Ok(false) => {
-        self.parked.fetch_sub(1, Ordering::SeqCst);
-        Verdict::Granted
-      }
-      Ok(true) => Verdict::Again(self.event.listen()),
-      Err(()) => {
-        self.parked.fetch_sub(1, Ordering::SeqCst);
-        Verdict::Closed
-      }
-    }
-  }
-
-  /// Under the lock: takes a free unit where the line is empty (`Ok(false)`), or joins the line
-  /// (`Ok(true)`). `Err(())` where the lane is closed.
-  fn queue(line: &mut Line, remaining: &Remaining) -> Result<bool, ()> {
     let mut current = remaining.load();
     loop {
-      if current & CLOSED != 0 {
-        return Err(());
-      }
-      let next = if current & WAITING == 0 && free(current) > 0 {
-        current - word(1, 0)
-      } else {
-        current | WAITING
+      let step = join(current);
+      let next = match step {
+        Join::Closed => {
+          drop(line);
+          spare.keep(Some(fresh));
+          return done(wait, Err(Closed));
+        }
+        Join::Take(next) | Join::Queue(next) => next,
       };
       match remaining.replace(current, next) {
-        Ok(()) if next & WAITING == 0 => return Ok(false),
+        Ok(()) if matches!(step, Join::Take(_)) => {
+          drop(line);
+          spare.keep(Some(fresh));
+          return done(wait, Ok(()));
+        }
         Ok(()) => {
-          line.waiting += 1;
-          return Ok(true);
+          *wait = Wait::Waiting(line.insert(fresh));
+          self.parked.fetch_add(1, Ordering::SeqCst);
+          return Poll::Pending;
         }
         Err(seen) => current = seen,
       }
     }
   }
 
-  /// A waiting reserve dropped before it resolved. A grant it held goes on, as a release would.
-  pub(crate) fn leave(&self, remaining: &Remaining, listener: EventListener) {
-    let notified = listener.discard();
-    let pass_on = {
-      let mut line = lock(&self.line);
-      self.parked.fetch_sub(1, Ordering::SeqCst);
-      if notified {
-        // A grant, or the close's wake. A close settled every grant already.
-        let open = remaining.load() & CLOSED == 0;
-        if open && line.granted > 0 {
-          line.granted -= 1;
-          true
-        } else {
-          false
-        }
-      } else {
-        // No notification: still in line, unless a grant decided for it is on its way to the
-        // next waiter. Either way the line holds one waiter fewer.
-        if line.waiting > 0 {
-          line.waiting -= 1;
-          if line.waiting == 0 {
-            remaining.update(|current| current & !WAITING);
+  /// A reserve in the line, polled again: its verdict, read from its own state, or its waker kept
+  /// up to date.
+  fn again(&self, wait: &mut Wait, waker: &Waker, spare: &mut Spare) -> Poll<Result<(), Closed>> {
+    let mut fresh: Option<Waker> = None;
+    loop {
+      {
+        let mut line = lock(&self.line);
+        let Wait::Waiting(key) = &*wait else {
+          return Poll::Pending;
+        };
+        match line.state(key) {
+          State::Queued => {
+            if line.will_wake(key, waker) {
+              spare.keep(fresh);
+              return Poll::Pending;
+            }
+            if let Some(new) = fresh.take() {
+              spare.keep(line.set_waker(key, new));
+              return Poll::Pending;
+            }
+          }
+          State::Notified | State::Closed => {
+            let Wait::Waiting(key) = mem::replace(wait, Wait::Done) else {
+              unreachable!("the reserve is in the line");
+            };
+            let (state, stored) = line.remove(key);
+            self.parked.fetch_sub(1, Ordering::SeqCst);
+            spare.keep(stored);
+            spare.keep(fresh);
+            return Poll::Ready(match state {
+              State::Notified => Ok(()),
+              _ => Err(Closed),
+            });
           }
         }
-        false
       }
-    };
-    if pass_on {
-      self.release(remaining);
+      // The waker changed. Its clone is user code: it is made with the lock let go, and with the
+      // key still in `wait`, so a panic in it leaves the reserve to its future's drop.
+      fresh = Some(waker.clone());
     }
   }
 
-  /// One unit back: free again where nobody waits, else granted to the oldest waiter.
-  pub(crate) fn release(&self, remaining: &Remaining) {
-    loop {
-      if remaining.try_give().is_ok() {
-        return;
-      }
-      {
-        let mut line = lock(&self.line);
-        if remaining.load() & WAITING == 0 {
-          // The line emptied since the word was read: give the unit back freely.
-          continue;
-        }
-        line.waiting -= 1;
-        line.granted += 1;
-        if line.waiting == 0 {
-          remaining.update(|current| current & !WAITING);
-        }
-      }
-      if self.event.notify(1.additional()) == 1 {
-        return;
-      }
-      // The waiter left first. The unit is this release's again, unless a close settled it.
+  /// A reserve dropped while it waits: it gives up its place, or passes on a grant it holds.
+  pub(crate) fn leave(&self, remaining: &Remaining, wait: &mut Wait) {
+    if !matches!(wait, Wait::Waiting(_)) {
+      return;
+    }
+    let (stored, granted) = {
       let mut line = lock(&self.line);
-      if remaining.load() & CLOSED != 0 {
-        return;
-      }
-      line.granted -= 1;
+      let Wait::Waiting(key) = mem::replace(wait, Wait::Done) else {
+        unreachable!("the reserve is in the line");
+      };
+      let (state, stored) = line.remove(key);
+      self.parked.fetch_sub(1, Ordering::SeqCst);
+      let granted = match state {
+        State::Queued => {
+          let queued = line.queued();
+          remaining.update(|current| left(current, queued));
+          None
+        }
+        State::Notified => Self::pass_on(&mut line, remaining),
+        State::Closed => None,
+      };
+      (stored, granted)
+    };
+    let mut wakes = Wakes::new();
+    wakes.discard(stored);
+    wakes.wake(granted);
+    wakes.finish();
+  }
+
+  /// One unit back: free again where nobody is in line, else granted to the oldest reserve in
+  /// line. Answers the granted reserve's waker, for the caller to wake once its own state changes
+  /// are done.
+  #[must_use = "the granted reserve's waker is to be woken"]
+  pub(crate) fn release(&self, remaining: &Remaining) -> Option<Waker> {
+    if remaining.try_give().is_ok() {
+      return None;
+    }
+    let mut line = lock(&self.line);
+    Self::pass_on(&mut line, remaining)
+  }
+
+  /// Under the lock: a unit goes to the oldest reserve in line, or to `free` where nobody is in
+  /// line.
+  fn pass_on(line: &mut Waiters, remaining: &Remaining) -> Option<Waker> {
+    // Where to is decided by the line, which only this lock changes; the compare-and-swap loop
+    // only absorbs a `take` or a `give`, which move `free` while `WAITING` is clear.
+    let queued = line.queued();
+    remaining.update(|current| match back(current, queued) {
+      Back::Grant(next) | Back::Add(next) => next,
+    });
+    if queued > 0 {
+      line.notify_oldest().flatten()
+    } else {
+      None
     }
   }
 
   /// Closes the lane's room: `CLOSED` set, every grant not taken up settled back, and every
-  /// waiter woken to read `Closed`. A second close does nothing.
-  pub(crate) fn close(&self, remaining: &Remaining) {
-    {
-      let mut line = lock(&self.line);
-      let granted = line.granted;
-      let before = remaining.update(|current| {
-        if current & CLOSED != 0 {
-          current
-        } else {
-          word(free(current) + granted, CLOSED)
-        }
-      });
-      if before & CLOSED != 0 {
-        return;
-      }
-      line.granted = 0;
-      line.waiting = 0;
+  /// reserve in line closed. Their wakers go onto `wakers`, to be woken once every state change
+  /// of the close is done. A second close does nothing.
+  pub(crate) fn close(&self, remaining: &Remaining, wakers: &mut Vec<Waker>) {
+    let mut line = lock(&self.line);
+    if remaining.load() & CLOSED != 0 {
+      return;
     }
-    self.event.notify(usize::MAX);
+    let granted = line.close_all(wakers);
+    remaining.update(|current| closed(current, granted));
   }
+}
+
+#[inline]
+fn done(wait: &mut Wait, verdict: Result<(), Closed>) -> Poll<Result<(), Closed>> {
+  *wait = Wait::Done;
+  Poll::Ready(verdict)
 }
 
 #[cfg(test)]

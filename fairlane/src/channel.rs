@@ -1,6 +1,6 @@
 //! What the two halves share, and the constructors.
 
-use core::{num::NonZeroUsize, panic::AssertUnwindSafe};
+use core::{num::NonZeroUsize, panic::AssertUnwindSafe, task::Waker};
 
 use event_listener::Event;
 use hybrid_array::Array;
@@ -18,6 +18,7 @@ use crate::{
   sender::Sender,
   snapshot::{Reading, Snapshot},
   sync::{Arc, AtomicBool, AtomicUsize, Mutex, Ordering, lock},
+  wake::{wake, wake_all},
 };
 
 /// A channel of several lanes, with the default policy: a count and a time, whichever comes first
@@ -117,10 +118,12 @@ pub(crate) struct LaneState<T, S> {
 }
 
 impl<T, S> LaneState<T, S> {
-  /// One unit of room back to the lane.
+  /// One unit of room back to the lane. Answers the waker of a reserve it granted, for the caller
+  /// to wake once its own state changes are done.
   #[inline]
-  pub(crate) fn release(&self) {
-    self.reserves.release(&self.remaining);
+  #[must_use = "the granted reserve's waker is to be woken"]
+  pub(crate) fn release(&self) -> Option<Waker> {
+    self.reserves.release(&self.remaining)
   }
 }
 
@@ -221,7 +224,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
         Ok(())
       }
       Err(item) => {
-        state.release();
+        wake(state.release());
         Err(item)
       }
     }
@@ -231,16 +234,21 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   /// ring's mark, so that no permit commits. Every call marks every lane before it returns, so
   /// nothing commits anywhere once any `close` has returned. True for the one call that came
   /// first.
+  ///
+  /// The reserves it closes are woken once every lane is marked: a waker is user code, and one
+  /// that panics leaves no lane open.
   pub(crate) fn close(&self) -> bool {
     let first = !self.closing.swap(true, Ordering::SeqCst);
+    let mut wakers = Vec::new();
     for state in self.lanes.as_slice() {
-      state.reserves.close(&state.remaining);
+      state.reserves.close(&state.remaining, &mut wakers);
       state.ring.close();
     }
     for state in self.lanes.as_slice() {
       state.arrivals.wake_all();
     }
     self.closed.notify(usize::MAX);
+    wake_all(wakers);
     first
   }
 
@@ -317,14 +325,15 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
         }
       }
     }
-    // Each item is dropped after the choice lock is let go, under its own catch.
+    // Each item is dropped after the choice lock is let go, under its own catch. The close has
+    // emptied every line, so a room given back here grants no reserve.
     for (index, item) in ahead {
-      self.lanes.at(index).release();
+      wake(self.lanes.at(index).release());
       let _ = std::panic::catch_unwind(AssertUnwindSafe(move || drop(item)));
     }
     for state in self.lanes.as_slice() {
       while let Some(popped) = state.ring.pop() {
-        state.release();
+        wake(state.release());
         let item = popped.item;
         let _ = std::panic::catch_unwind(AssertUnwindSafe(move || drop(item)));
       }

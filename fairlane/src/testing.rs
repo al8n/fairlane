@@ -97,3 +97,90 @@ pub(crate) fn poll_with<F: core::future::Future + Unpin>(
 ) -> core::task::Poll<F::Output> {
   core::pin::Pin::new(future).poll(&mut core::task::Context::from_waker(waker))
 }
+
+pub(crate) use faulty::Faults;
+
+/// A waker whose `clone`, `wake` and `drop` panic while a switch is on: the user code a waker is,
+/// at its worst. `std::task::Wake` gives no hook on `clone`, so the waker is built on a raw vtable.
+#[allow(unsafe_code)]
+mod faulty {
+  use std::{
+    sync::{
+      Arc,
+      atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst},
+    },
+    task::{RawWaker, RawWakerVTable, Waker},
+  };
+
+  /// The switches and the count of wakes behind one faulty waker and all its clones.
+  #[derive(Default)]
+  pub(crate) struct Faults {
+    pub(crate) clone_panics: AtomicBool,
+    pub(crate) wake_panics: AtomicBool,
+    pub(crate) drop_panics: AtomicBool,
+    pub(crate) wakes: AtomicUsize,
+  }
+
+  impl Faults {
+    /// A waker over these switches.
+    pub(crate) fn waker(self: &Arc<Self>) -> Waker {
+      let data = Arc::into_raw(self.clone());
+      // SAFETY: every function of `VTABLE` takes `data` as an `Arc<Faults>` made by
+      // `Arc::into_raw`, each waker holding one strong count: a clone adds one, and a wake or a
+      // drop releases its own.
+      unsafe { Waker::from_raw(raw(data)) }
+    }
+
+    /// Whether the waker was woken since the last call.
+    pub(crate) fn take(&self) -> bool {
+      self.wakes.swap(0, SeqCst) > 0
+    }
+  }
+
+  const VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake_by_ref, drop);
+
+  fn raw(data: *const Faults) -> RawWaker {
+    RawWaker::new(data.cast(), &VTABLE)
+  }
+
+  unsafe fn clone(data: *const ()) -> RawWaker {
+    let faults = data.cast::<Faults>();
+    // SAFETY: `data` is a live `Arc<Faults>` of this vtable, borrowed.
+    if unsafe { (*faults).clone_panics.load(SeqCst) } {
+      panic!("a waker's clone panics");
+    }
+    // SAFETY: as above; the new waker owns the count added here.
+    unsafe { Arc::increment_strong_count(faults) };
+    raw(faults)
+  }
+
+  unsafe fn wake(data: *const ()) {
+    // SAFETY: this waker's own count, released here.
+    let faults = unsafe { Arc::from_raw(data.cast::<Faults>()) };
+    faults.wakes.fetch_add(1, SeqCst);
+    let panics = faults.wake_panics.load(SeqCst);
+    core::mem::drop(faults);
+    if panics {
+      panic!("a waker's wake panics");
+    }
+  }
+
+  unsafe fn wake_by_ref(data: *const ()) {
+    // SAFETY: a live `Arc<Faults>` of this vtable, borrowed.
+    let faults = unsafe { &*data.cast::<Faults>() };
+    faults.wakes.fetch_add(1, SeqCst);
+    if faults.wake_panics.load(SeqCst) {
+      panic!("a waker's wake panics");
+    }
+  }
+
+  unsafe fn drop(data: *const ()) {
+    // SAFETY: this waker's own count, released here.
+    let faults = unsafe { Arc::from_raw(data.cast::<Faults>()) };
+    let panics = faults.drop_panics.load(SeqCst);
+    core::mem::drop(faults);
+    if panics {
+      panic!("a waker's drop panics");
+    }
+  }
+}

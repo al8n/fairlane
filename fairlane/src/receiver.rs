@@ -19,6 +19,7 @@ use crate::{
   quota::Quota,
   snapshot::Snapshot,
   sync::{Arc, Mutex, Ordering, lock},
+  wake::{Wakes, wake},
 };
 
 /// The receiving half of a channel. Clones share the channel: each item goes to one receive.
@@ -128,7 +129,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
       let Some(popped) = state.ring.pop() else {
         break;
       };
-      state.release();
+      wake(state.release());
       sink(Received {
         item: popped.item,
         lane: self.name(0),
@@ -296,6 +297,9 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
 }
 
 /// The room of the items one receive took, given back when it is dropped: after the choice lock.
+///
+/// Every unit is given back. A reserve a unit is granted to is woken under its own catch, so a
+/// waker that panics skips no other unit; its panic is raised again once all are back.
 struct RoomBack<'a, T, L: Lane, Y: Policy<L>> {
   shared: &'a Shared<T, L, Y>,
   units: PerLane<usize, L>,
@@ -303,11 +307,13 @@ struct RoomBack<'a, T, L: Lane, Y: Policy<L>> {
 
 impl<T, L: Lane, Y: Policy<L>> Drop for RoomBack<'_, T, L, Y> {
   fn drop(&mut self) {
+    let mut wakes = Wakes::new();
     for (index, units) in self.units.as_slice().iter().enumerate() {
       for _ in 0..*units {
-        self.shared.lane_at(index).release();
+        wakes.wake(self.shared.lane_at(index).release());
       }
     }
+    wakes.finish();
   }
 }
 

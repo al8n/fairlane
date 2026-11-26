@@ -167,6 +167,53 @@ fn mp5_a_release_and_a_reserve_about_to_wait() {
   });
 }
 
+/// A reserve granted and dropped before it was told, a newcomer, and a later waiter (Codex round
+/// 1's second scenario). The grant is the dropped reserve's until it passes it on, so the later
+/// waiter is granted, and the lane keeps its one unit.
+#[test]
+fn mp7_a_dropped_grant_passes_on_to_a_later_waiter() {
+  model(|| {
+    let (tx, rx) = channel(1);
+    tx.try_send(Single, 0).unwrap();
+    let dropped = {
+      let tx = tx.clone();
+      thread::spawn(move || {
+        let mut reserve = tx.reserve(Single);
+        let _ = poll_once(&mut reserve);
+        drop(reserve);
+      })
+    };
+    let receiver = thread::spawn(move || {
+      rx.recv_blocking().unwrap();
+      rx
+    });
+    let later = {
+      let tx = tx.clone();
+      thread::spawn(move || match tx.try_reserve(Single) {
+        Ok(newcomer) => {
+          let mut waiter = tx.reserve(Single);
+          let first = poll_once(&mut waiter);
+          drop(newcomer);
+          let permit = match first {
+            Poll::Ready(permit) => permit,
+            Poll::Pending => block_on(waiter),
+          };
+          drop(permit.unwrap());
+        }
+        Err(_) => drop(tx.reserve_blocking(Single).unwrap()),
+      })
+    };
+    dropped.join().unwrap();
+    later.join().unwrap();
+    let rx = receiver.join().unwrap();
+    assert!(
+      tx.try_reserve(Single).is_ok(),
+      "the lane keeps its one unit"
+    );
+    drop(rx);
+  });
+}
+
 /// Two receivers wait; one item is committed; one receiver's future is dropped at once, maybe
 /// holding the notification: the other receives the item.
 #[test]
@@ -331,5 +378,71 @@ fn mc4_a_send_and_a_close_meet_on_the_mark() {
         assert!(got.is_empty());
       }
     }
+  });
+}
+
+/// A close against a reserve that is dropped, granted or not: afterwards the lane's room is whole.
+/// It guards the line's own close and leave: the close settles a grant not taken up, and a dropped
+/// reserve that was closed gives nothing back twice. The round-1 line passes it too.
+#[test]
+fn mc5_a_close_racing_a_dropped_reserve_keeps_the_room() {
+  model(|| {
+    let (tx, rx) = channel(1);
+    tx.try_send(Single, 0).unwrap();
+    let dropped = {
+      let tx = tx.clone();
+      thread::spawn(move || {
+        let mut reserve = tx.reserve(Single);
+        let _ = poll_once(&mut reserve);
+        drop(reserve);
+      })
+    };
+    let receiver = thread::spawn(move || {
+      rx.recv_blocking().unwrap();
+      rx
+    });
+    let closer = {
+      let tx = tx.clone();
+      thread::spawn(move || {
+        tx.close();
+      })
+    };
+    dropped.join().unwrap();
+    closer.join().unwrap();
+    let rx = receiver.join().unwrap();
+    let snapshot = tx.snapshot();
+    assert_eq!(
+      (
+        snapshot.remaining(Single),
+        snapshot.reserved(Single),
+        snapshot.senders_waiting(Single)
+      ),
+      (1, 0, 0)
+    );
+    drop(rx);
+  });
+}
+
+/// A reserve polled once with one waker, then driven with another, against a close: the waker's
+/// refresh never misses the close's wake, and the reserve resolves `Closed`.
+#[test]
+fn mc6_a_refreshed_reserve_resolves_at_a_close() {
+  model(|| {
+    let (tx, rx) = channel(1);
+    tx.try_send(Single, 0).unwrap();
+    let closer = tx.clone();
+    let waiter = thread::spawn(move || {
+      let mut reserve = tx.reserve(Single);
+      match poll_once(&mut reserve) {
+        Poll::Ready(verdict) => verdict.map(drop),
+        Poll::Pending => block_on(reserve).map(drop),
+      }
+    });
+    let closing = thread::spawn(move || {
+      closer.close();
+      closer
+    });
+    assert_eq!(waiter.join().unwrap(), Err(Closed));
+    drop((closing.join().unwrap(), rx));
   });
 }

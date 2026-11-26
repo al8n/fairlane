@@ -62,6 +62,64 @@ pub(crate) const fn free(word: usize) -> usize {
   word >> 2
 }
 
+// The reserve line's transitions, under its lock. Each is a function of the word and the number of
+// reserves in line; the line applies it with a compare-and-swap, since a `take` or a `give` can move
+// `free` while `WAITING` is clear. Together they keep, at every exit from the lock and while the
+// lane is open: `WAITING` exactly while a reserve is in line, and `WAITING` only where `free` is 0.
+
+/// What a reserve that found no unit it could take does, under the line lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Join {
+  /// The lane is closed.
+  Closed,
+  /// A unit came back meanwhile and nobody is in line: it is taken. The new word.
+  Take(usize),
+  /// It joins the line. The new word, with `WAITING`.
+  Queue(usize),
+}
+
+#[inline]
+pub(crate) const fn join(word: usize) -> Join {
+  if word & CLOSED != 0 {
+    Join::Closed
+  } else if word & WAITING == 0 && word >= UNIT {
+    Join::Take(word - UNIT)
+  } else {
+    Join::Queue(word | WAITING)
+  }
+}
+
+/// Where a unit that came back goes, under the line lock, with `queued` reserves in line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Back {
+  /// To the oldest reserve in line. The new word: `WAITING` cleared where it was the last.
+  Grant(usize),
+  /// To `free`, nobody being in line. The new word.
+  Add(usize),
+}
+
+#[inline]
+pub(crate) const fn back(word: usize, queued: usize) -> Back {
+  if queued > 0 {
+    Back::Grant(if queued == 1 { word & !WAITING } else { word })
+  } else {
+    Back::Add((word & !WAITING) + UNIT)
+  }
+}
+
+/// The word after a reserve in line leaves it, `queued` being left in line after it.
+#[inline]
+pub(crate) const fn left(word: usize, queued: usize) -> usize {
+  if queued == 0 { word & !WAITING } else { word }
+}
+
+/// The word a close leaves: the `granted` units not taken up settled back into `free`, `WAITING`
+/// cleared, `CLOSED` set.
+#[inline]
+pub(crate) const fn closed(word: usize, granted: usize) -> usize {
+  self::word(free(word) + granted, CLOSED)
+}
+
 /// A word of `free` units and the given flags.
 #[inline]
 pub(crate) const fn word(free: usize, flags: usize) -> usize {

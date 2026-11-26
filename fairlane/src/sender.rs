@@ -1,7 +1,6 @@
 use core::{
   fmt,
   future::Future,
-  mem,
   pin::Pin,
   task::{Context, Poll},
 };
@@ -16,9 +15,10 @@ use crate::{
   permit::{OwnedPermit, Permit},
   policy::{DefaultPolicy, Policy},
   remaining::Refusal,
-  reserves::{Begin, Verdict},
+  reserves::Wait,
   snapshot::Snapshot,
   sync::Arc,
+  wake::Spare,
 };
 
 /// The sending half of a channel. Clones share the channel; the last one dropped closes it, and
@@ -225,61 +225,28 @@ impl<T, L: Lane, Y: Policy<L>> fmt::Debug for Sender<T, L, Y> {
   }
 }
 
-/// Where a reserve is.
-pub(crate) enum Wait {
-  Start,
-  Waiting(EventListener),
-  Done,
-}
-
-impl Wait {
-  /// Polls a reserve of lane `index` to its verdict.
-  pub(crate) fn poll<T, L: Lane, Y: Policy<L>>(
-    &mut self,
-    shared: &Shared<T, L, Y>,
-    index: usize,
-    cx: &mut Context<'_>,
-  ) -> Poll<Result<(), Closed>> {
-    let state = shared.lane_at(index);
-    loop {
-      match self {
-        Wait::Start => match state.remaining.try_take() {
-          Ok(()) => return self.done(Ok(())),
-          Err(Refusal::Closed) => return self.done(Err(Closed)),
-          Err(Refusal::Busy) => match state.reserves.begin(&state.remaining) {
-            Begin::Granted => return self.done(Ok(())),
-            Begin::Closed => return self.done(Err(Closed)),
-            Begin::Waiting(listener) => *self = Wait::Waiting(listener),
-          },
-        },
-        Wait::Waiting(listener) => {
-          if Pin::new(listener).poll(cx).is_pending() {
-            return Poll::Pending;
-          }
-          match state.reserves.woken(&state.remaining) {
-            Verdict::Granted => return self.done(Ok(())),
-            Verdict::Closed => return self.done(Err(Closed)),
-            Verdict::Again(listener) => *self = Wait::Waiting(listener),
-          }
-        }
-        // Polled after it resolved: the future's contract leaves this open, and it never wakes.
-        Wait::Done => return Poll::Pending,
-      }
-    }
-  }
-
+impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
+  /// Polls the reserve at `wait`, of lane `index`, to its verdict. Wakers it no longer needs go to
+  /// `spare`, which the caller drops once it owns the verdict.
   #[inline]
-  fn done(&mut self, verdict: Result<(), Closed>) -> Poll<Result<(), Closed>> {
-    *self = Wait::Done;
-    Poll::Ready(verdict)
+  fn poll_reserve(
+    &self,
+    index: usize,
+    wait: &mut Wait,
+    cx: &mut Context<'_>,
+    spare: &mut Spare,
+  ) -> Poll<Result<(), Closed>> {
+    let state = self.lane_at(index);
+    state
+      .reserves
+      .poll(&state.remaining, wait, cx.waker(), spare)
   }
 
   /// A reserve dropped: one that waits leaves the line, passing on a grant it holds.
-  pub(crate) fn leave<T, L: Lane, Y: Policy<L>>(&mut self, shared: &Shared<T, L, Y>, index: usize) {
-    if let Wait::Waiting(listener) = mem::replace(self, Wait::Done) {
-      let state = shared.lane_at(index);
-      state.reserves.leave(&state.remaining, listener);
-    }
+  #[inline]
+  fn leave_reserve(&self, index: usize, wait: &mut Wait) {
+    let state = self.lane_at(index);
+    state.reserves.leave(&state.remaining, wait);
   }
 }
 
@@ -301,17 +268,21 @@ impl<'a, T, L: Lane, Y: Policy<L>> Future for Reserve<'a, T, L, Y> {
 
   fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
     let this = self.get_mut();
-    this
-      .wait
-      .poll(this.shared, this.index, cx)
-      .map_ok(|()| Permit::new(this.shared, this.index, this.lane))
+    let mut spare = Spare::new();
+    let output = this
+      .shared
+      .poll_reserve(this.index, &mut this.wait, cx, &mut spare)
+      .map_ok(|()| Permit::new(this.shared, this.index, this.lane));
+    // The permit exists before a spare waker's drop runs, so a panic there gives its room back.
+    drop(spare);
+    output
   }
 }
 
 impl<T, L: Lane, Y: Policy<L>> Drop for Reserve<'_, T, L, Y> {
   #[inline]
   fn drop(&mut self) {
-    self.wait.leave(self.shared, self.index);
+    self.shared.leave_reserve(self.index, &mut self.wait);
   }
 }
 
@@ -345,14 +316,21 @@ impl<T, L: Lane, Y: Policy<L>> Future for ReserveOwned<T, L, Y> {
     let Some(sender) = &this.sender else {
       return Poll::Pending;
     };
-    match this.wait.poll(&sender.shared, this.index, cx) {
+    let mut spare = Spare::new();
+    let output = match sender
+      .shared
+      .poll_reserve(this.index, &mut this.wait, cx, &mut spare)
+    {
       Poll::Pending => Poll::Pending,
       Poll::Ready(Err(closed)) => Poll::Ready(Err(closed)),
       Poll::Ready(Ok(())) => match this.sender.take() {
         Some(sender) => Poll::Ready(Ok(OwnedPermit::new(sender, this.index, this.lane))),
         None => Poll::Pending,
       },
-    }
+    };
+    // As `Reserve`'s: the permit exists before a spare waker's drop runs.
+    drop(spare);
+    output
   }
 }
 
@@ -360,7 +338,7 @@ impl<T, L: Lane, Y: Policy<L>> Drop for ReserveOwned<T, L, Y> {
   #[inline]
   fn drop(&mut self) {
     if let Some(sender) = &self.sender {
-      self.wait.leave(&sender.shared, self.index);
+      sender.shared.leave_reserve(self.index, &mut self.wait);
     }
   }
 }
@@ -389,19 +367,25 @@ impl<T, L: Lane, Y: Policy<L>> Future for Sending<'_, T, L, Y> {
 
   fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
     let this = self.get_mut();
-    let verdict = match this
-      .reserve
-      .wait
-      .poll(this.reserve.shared, this.reserve.index, cx)
-    {
-      Poll::Pending => return Poll::Pending,
-      Poll::Ready(verdict) => verdict,
-    };
+    let reserve = &mut this.reserve;
+    let mut spare = Spare::new();
+    let verdict =
+      match reserve
+        .shared
+        .poll_reserve(reserve.index, &mut reserve.wait, cx, &mut spare)
+      {
+        Poll::Pending => return Poll::Pending,
+        Poll::Ready(verdict) => verdict,
+      };
+    let permit = verdict.map(|()| Permit::new(reserve.shared, reserve.index, reserve.lane));
+    // As `Reserve`'s: the permit exists before a spare waker's drop runs, and the item is still
+    // the future's.
+    drop(spare);
     let Some(item) = this.item.take() else {
       return Poll::Pending;
     };
-    Poll::Ready(match verdict {
-      Ok(()) => Permit::new(this.reserve.shared, this.reserve.index, this.reserve.lane).send(item),
+    Poll::Ready(match permit {
+      Ok(permit) => permit.send(item),
       Err(Closed) => Err(SendError(item)),
     })
   }

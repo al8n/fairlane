@@ -91,6 +91,8 @@ mod ring;
 mod sender;
 mod snapshot;
 mod sync;
+mod waiters;
+mod wake;
 
 #[cfg(test)]
 mod model;
