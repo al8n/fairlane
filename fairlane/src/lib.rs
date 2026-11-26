@@ -16,6 +16,11 @@
 #[cfg(all(loom, not(feature = "loom")))]
 compile_error!("`--cfg loom` builds fairlane on loom, which needs fairlane's `loom` feature");
 
+#[cfg(not(target_has_atomic = "64"))]
+compile_error!(
+  "fairlane needs 64-bit atomics: a ring position, which is an item's ordinal, is an `AtomicU64`"
+);
+
 #[cfg(feature = "test-util")]
 #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
 pub use clock::ManualClock;
@@ -71,6 +76,8 @@ mod options;
 mod park;
 mod policy;
 mod quota;
+#[allow(unsafe_code)]
+mod ring;
 mod sync;
 
 #[cfg(test)]
