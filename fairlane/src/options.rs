@@ -1,6 +1,9 @@
 use core::{fmt, num::NonZeroUsize};
 
-use crate::lane::{Lane, PerLane, lane_count};
+use crate::{
+  __private::MAX_LANES,
+  lane::{Lane, PerLane, lane_count},
+};
 
 /// One lane's options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -95,15 +98,13 @@ impl<L: Lane> Options<L> {
       .unwrap_or_else(|| L::from_index(index).is_some_and(Lane::is_express))
   }
 
-  /// Refuses, by name, options no channel can be made from: no lane; a vocabulary whose indices
-  /// do not round-trip; an express lane behind a lane that is not; a capacity above
-  /// [`MAX_CAPACITY`]. A capacity the ring cannot allocate for its item type is refused where the
-  /// ring is made.
+  /// Refuses, by name, options no channel can be made from: no lane, or more than 256; a
+  /// vocabulary whose indices do not round-trip; an express lane behind a lane that is not; a
+  /// capacity above [`MAX_CAPACITY`]. A capacity the ring cannot allocate for its item type is
+  /// refused where the ring is made.
   pub(crate) fn check(&self) -> Result<(), Malformed> {
+    Self::check_count()?;
     let count = lane_count::<L>();
-    if count == 0 {
-      return Err(Malformed::NoLanes);
-    }
     for index in 0..count {
       if L::from_index(index).is_none_or(|lane| lane.index() != index) {
         return Err(Malformed::Indices(index));
@@ -126,6 +127,18 @@ impl<L: Lane> Options<L> {
   }
 }
 
+impl<L: Lane> Options<L> {
+  /// Refuses a vocabulary of no lane, or of more than [`MAX_LANES`]: before anything whose size
+  /// grows with the lane count is built.
+  pub(crate) fn check_count() -> Result<(), Malformed> {
+    match lane_count::<L>() {
+      0 => Err(Malformed::NoLanes),
+      count if count > MAX_LANES => Err(Malformed::TooManyLanes),
+      _ => Ok(()),
+    }
+  }
+}
+
 /// The largest capacity a lane can have: its remaining capacity shares one word with two flags.
 pub(crate) const MAX_CAPACITY: usize = usize::MAX >> 2;
 
@@ -136,6 +149,9 @@ pub(crate) const MAX_CAPACITY: usize = usize::MAX >> 2;
 pub enum Malformed {
   /// The vocabulary has no lane.
   NoLanes,
+  /// The vocabulary has more than 256 lanes, the most a channel has: every receive and snapshot
+  /// keeps a reading per lane on the stack, and 256 keeps those small.
+  TooManyLanes,
   /// `Lane::from_index` and `Lane::index` do not round-trip at this index, or `from_index` is
   /// `Some` at the lane count.
   Indices(usize),
@@ -149,6 +165,10 @@ impl fmt::Display for Malformed {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
       Self::NoLanes => f.write_str("the lane vocabulary has no lane"),
+      Self::TooManyLanes => write!(
+        f,
+        "the lane vocabulary has more than {MAX_LANES} lanes, the most a channel has"
+      ),
       Self::Indices(index) => write!(
         f,
         "`Lane::from_index` and `Lane::index` do not round-trip at index {index}"

@@ -390,3 +390,55 @@ fn a_lane_closes_alone_at_its_last_position() {
     "lane B is closed and empty"
   );
 }
+
+/// A hand-written vocabulary of more lanes than a channel holds is refused by name, by both
+/// constructors of a channel of several lanes.
+#[test]
+fn more_lanes_than_a_channel_holds_are_refused() {
+  use crate::testing::Wide;
+
+  let options = || Options::<Wide<257>>::from_fn(|_| LaneOptions::new(cap(1)));
+  assert_eq!(
+    channel::<u32, Wide<257>>(options()).unwrap_err(),
+    Malformed::TooManyLanes
+  );
+  assert_eq!(
+    channel_with::<u32, Wide<257>, _>(options(), Strict).unwrap_err(),
+    Malformed::TooManyLanes
+  );
+}
+
+/// The most lanes a channel holds, built and used on a thread with a 256 KiB stack: a receive
+/// under the default policy with several lanes in view, a waiting reserve, and a snapshot, each
+/// keep their per-lane readings on that stack.
+#[test]
+fn the_most_lanes_fit_a_small_stack() {
+  use crate::testing::Wide;
+
+  std::thread::Builder::new()
+    .stack_size(256 * 1024)
+    .spawn(|| {
+      let options = Options::<Wide<256>>::from_fn(|_| LaneOptions::new(cap(1)));
+      let (tx, rx) = channel::<u32, Wide<256>>(options).unwrap();
+      tx.try_send(Wide(255), 1).unwrap();
+      tx.try_send(Wide(254), 2).unwrap();
+      tx.try_send(Wide(0), 3).unwrap();
+      let (probe, waker) = Probe::new();
+      let mut waiting = tx.reserve(Wide(0));
+      assert!(poll_with(&mut waiting, &waker).is_pending());
+      assert_eq!(tx.snapshot().senders_waiting(Wide(0)), 1);
+      let mut batch = Vec::new();
+      assert_eq!(rx.try_recv_many(&mut batch, 3), Ok(3));
+      assert!(
+        probe.take(),
+        "the room of lane 0 went to its waiting reserve"
+      );
+      assert!(matches!(
+        poll_with(&mut waiting, &waker),
+        Poll::Ready(Ok(_))
+      ));
+    })
+    .unwrap()
+    .join()
+    .unwrap();
+}

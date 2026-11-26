@@ -32,8 +32,8 @@ use crate::{
 ///
 /// # Errors
 ///
-/// [`Malformed`], by name: no lane; a [`Lane`] whose indices do not round-trip; an express lane
-/// behind one that is not; a capacity that cannot be held as a ring.
+/// [`Malformed`], by name: no lane, or more than 256; a [`Lane`] whose indices do not round-trip;
+/// an express lane behind one that is not; a capacity that cannot be held as a ring.
 ///
 /// ```
 /// use core::num::NonZeroUsize;
@@ -62,6 +62,8 @@ use crate::{
 pub fn channel<T, L: Lane>(
   options: Options<L>,
 ) -> Result<Halves<T, L, DefaultPolicy<L>>, Malformed> {
+  // The lane count first: the default policy keeps numbers per lane.
+  Options::<L>::check_count()?;
   pair(&options, DefaultPolicy::default())
 }
 

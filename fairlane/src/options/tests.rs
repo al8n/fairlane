@@ -146,6 +146,16 @@ fn check_refuses_no_lanes() {
 }
 
 #[test]
+fn check_refuses_more_lanes_than_a_channel_holds() {
+  use crate::testing::Wide;
+
+  let options = Options::<Wide<257>>::from_fn(|_| LaneOptions::new(cap(1)));
+  assert_eq!(options.check(), Err(Malformed::TooManyLanes));
+  let options = Options::<Wide<256>>::from_fn(|_| LaneOptions::new(cap(1)));
+  assert_eq!(options.check(), Ok(()));
+}
+
+#[test]
 fn check_refuses_indices_that_do_not_round_trip() {
   let options = Options::<Folded>::from_fn(|_| LaneOptions::new(cap(1)));
   assert_eq!(options.check(), Err(Malformed::Indices(1)));
@@ -187,6 +197,11 @@ fn malformed_says_which_lane() {
     Malformed::NoLanes.to_string(),
     "the lane vocabulary has no lane"
   );
+  assert_eq!(
+    Malformed::TooManyLanes.to_string(),
+    format!("the lane vocabulary has more than {MAX_LANES} lanes, the most a channel has")
+  );
+  assert_eq!(MAX_LANES, 256, "the number the docs write out");
 }
 
 /// Not under miri: they reach no `unsafe` of this crate, and serde_json's own error path trips

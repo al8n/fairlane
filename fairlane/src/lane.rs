@@ -26,8 +26,13 @@ use typenum::Unsigned;
 /// [`channel`](crate::channel) checks the round trip and refuses a vocabulary that breaks it with
 /// [`Malformed::Indices`](crate::Malformed::Indices).
 pub trait Lane: Copy + Eq + fmt::Debug + Send + Sync + 'static {
-  /// How many lanes there are, as a type. The derive writes it; a hand-written implementation
-  /// names a `typenum` constant, such as `typenum::U2`.
+  /// How many lanes there are, as a type: from 1 to 256. The derive writes it; a hand-written
+  /// implementation names a `typenum` constant, such as `typenum::U2`.
+  ///
+  /// A channel holds at most 256 lanes: every receive, and every snapshot, keeps a reading per
+  /// lane on the stack, and 256 keeps those small. The derive refuses more at compile time, and
+  /// [`channel`](crate::channel) refuses a hand-written vocabulary of more with
+  /// [`Malformed::TooManyLanes`](crate::Malformed::TooManyLanes).
   type N: ArraySize;
 
   /// The lane's place in the order: 0 is served first.

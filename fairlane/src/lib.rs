@@ -65,8 +65,9 @@ pub use snapshot::Snapshot;
 /// - on the enum, `crate = "…"`: the path to this crate, for a crate that re-exports it.
 ///
 /// It refuses, each by name, at compile time: an item that is not an enum; generic parameters; an
-/// enum with no variant; a variant with fields; a variant with a discriminant; an express lane
-/// behind one that is not; two lanes of one name; an unknown word; a word given twice.
+/// enum with no variant, or with more than 256; a variant with fields; a variant with a
+/// discriminant; an express lane behind one that is not; two lanes of one name; an unknown word; a
+/// word given twice.
 #[cfg(feature = "derive")]
 #[cfg_attr(docsrs, doc(cfg(feature = "derive")))]
 pub use fairlane_derive::Lane;
@@ -106,4 +107,8 @@ mod testing;
 #[doc(hidden)]
 pub mod __private {
   pub use typenum;
+
+  /// The most lanes a vocabulary has: `Lane::N` is at most 256. The derive asserts it at compile
+  /// time, and `Options::check` refuses a hand-written vocabulary past it.
+  pub const MAX_LANES: usize = 256;
 }

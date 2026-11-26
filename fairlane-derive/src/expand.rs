@@ -67,6 +67,12 @@ pub(crate) fn lane(input: &DeriveInput) -> syn::Result<TokenStream> {
     .enumerate()
     .map(|(index, lane)| format!("`{ident}::{}` must have discriminant {index}", lane.ident))
     .collect();
+  // A const panic cannot format the limit, so the message names the count and the cause; the
+  // limit itself has one source, the crate's `__private::MAX_LANES`.
+  let too_many = format!(
+    "`{ident}` has {} lanes, more than a fairlane channel holds (see `Lane::N`)",
+    lanes.len()
+  );
 
   Ok(quote! {
     #[automatically_derived]
@@ -104,6 +110,7 @@ pub(crate) fn lane(input: &DeriveInput) -> syn::Result<TokenStream> {
     #[allow(clippy::assertions_on_constants)]
     const _: () = {
       #( ::core::assert!(#ident::#variants as ::core::primitive::usize == #indices, #messages); )*
+      ::core::assert!(#count <= #krate::__private::MAX_LANES, #too_many);
     };
   })
 }

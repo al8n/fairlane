@@ -42,6 +42,19 @@ fn expands_a_plain_enum() {
 }
 
 #[test]
+fn asserts_the_lane_count_against_the_crates_limit() {
+  let out = expansion(parse_quote! { enum Urgency { One, Two } });
+  assert!(
+    out.contains(":: core :: assert ! (2 <= :: fairlane :: __private :: MAX_LANES"),
+    "{out}"
+  );
+  assert!(
+    out.contains("\"`Urgency` has 2 lanes, more than a fairlane channel holds (see `Lane::N`)\""),
+    "{out}"
+  );
+}
+
+#[test]
 fn roots_paths_at_the_crate_word() {
   let out = expansion(parse_quote! {
     #[fairlane(crate = "resident::fairlane")]

@@ -34,6 +34,33 @@ impl Lane for Three {
   }
 }
 
+/// A vocabulary of `N` lanes, numbered: the most a channel holds, and one more.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Wide<const N: usize>(pub(crate) u16);
+
+macro_rules! wide {
+  ($n:literal, $size:ty) => {
+    impl Lane for Wide<$n> {
+      type N = $size;
+
+      fn index(self) -> usize {
+        self.0.into()
+      }
+
+      fn from_index(index: usize) -> Option<Self> {
+        u16::try_from(index).ok().filter(|_| index < $n).map(Self)
+      }
+
+      fn as_str(self) -> &'static str {
+        "wide"
+      }
+    }
+  };
+}
+
+wide!(256, typenum::U256);
+wide!(257, typenum::U257);
+
 /// SplitMix64: a seeded, replayable source of test choices. A failing seed is printed and run
 /// again by itself.
 pub(crate) struct Rng(u64);
