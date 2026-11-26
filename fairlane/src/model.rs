@@ -56,7 +56,7 @@ pub(crate) struct LaneCounts {
   pub(crate) closed: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Waiter {
   /// In its lane's line.
   Waiting(usize),
@@ -66,7 +66,7 @@ enum Waiter {
   Closed,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct LaneModel<T, S> {
   capacity: usize,
   express: bool,
@@ -80,7 +80,7 @@ struct LaneModel<T, S> {
 }
 
 /// A batch's running state: how much it holds, and the limit its lanes have set.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct Batch {
   held: usize,
   limit: usize,
@@ -105,7 +105,7 @@ pub(crate) enum Choice<T, L> {
   Nothing,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct Model<T, L: Lane, S> {
   lanes: Vec<LaneModel<T, S>>,
   passed_over: Vec<u32>,
@@ -223,6 +223,11 @@ impl<T, L: Lane, S: Copy> Model<T, L, S> {
     }
   }
 
+  /// The room of an item taken by [`choose_held`](Self::choose_held), given back.
+  pub(crate) fn give(&mut self, lane: L) {
+    self.release(lane.index());
+  }
+
   /// A permit dropped unsent.
   pub(crate) fn drop_permit(&mut self, permit: PermitId) {
     let index = self.permits.remove(&permit).expect("a live permit");
@@ -249,8 +254,25 @@ impl<T, L: Lane, S: Copy> Model<T, L, S> {
     L::from_index(self.permits[&permit]).expect("a valid lane")
   }
 
-  /// One choice of a batch, for `quota`, read at `now`.
+  /// One choice of a batch, for `quota`, read at `now`; the room of an item taken goes back at
+  /// once.
   pub(crate) fn choose<Y: Policy<L, Stamp = S>>(
+    &mut self,
+    quota: &Quota<L>,
+    now: S,
+    policy: &Y,
+    batch: &mut Batch,
+  ) -> Choice<T, L> {
+    let choice = self.choose_held(quota, now, policy, batch);
+    if let Choice::Took(taken) = &choice {
+      self.give(taken.lane);
+    }
+    choice
+  }
+
+  /// [`choose`](Self::choose), with the room of an item taken still held: the channel gives it
+  /// back after the pop, by its own step, [`give`](Self::give).
+  pub(crate) fn choose_held<Y: Policy<L, Stamp = S>>(
     &mut self,
     quota: &Quota<L>,
     now: S,
@@ -314,7 +336,6 @@ impl<T, L: Lane, S: Copy> Model<T, L, S> {
     let (ordinal, item, _) = lane.queue.pop_front().expect("a lane read as waiting");
     lane.received += 1;
     lane.held += 1;
-    self.release(chosen);
     Choice::Took(Taken {
       item,
       lane: L::from_index(chosen).expect("a valid lane"),
