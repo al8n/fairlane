@@ -85,12 +85,22 @@ mod cell {
 }
 
 /// Waits out another thread's last few instructions: a backoff, or a yield to loom's scheduler.
+///
+/// Each wait takes a witness: the exact state the caller's decision to wait read. Outside loom it
+/// is unused. Under loom, a wait whose witness equals the previous wait's is a repeat of identical
+/// reads leading to the identical decision, equivalent to one wait, and `loom::skip_branch()`
+/// stops exploring it: loom's DPOR would otherwise run two spinners in turn without end, as a
+/// switch between threads that yield is no preemption. Any change in the witness keeps the
+/// branch, so a wait on another cell (another pop took `head` meanwhile) is still explored.
 pub(crate) struct Spin {
   #[cfg(not(loom))]
   backoff: crossbeam_utils::Backoff,
   /// Under loom, the waits so far: a diagnostic for a spin that loom runs without end.
   #[cfg(loom)]
   waits: core::cell::Cell<u32>,
+  /// Under loom, the previous wait's witness.
+  #[cfg(loom)]
+  last: core::cell::Cell<Option<[u64; 3]>>,
 }
 
 /// Under loom, the waits after which a spin is reported. Every spin of the crate waits for
@@ -107,13 +117,19 @@ impl Spin {
       backoff: crossbeam_utils::Backoff::new(),
       #[cfg(loom)]
       waits: core::cell::Cell::new(0),
+      #[cfg(loom)]
+      last: core::cell::Cell::new(None),
     }
   }
 
+  /// One wait, after a decision that read `witness`.
   #[inline]
-  pub(crate) fn wait(&self) {
+  pub(crate) fn wait(&self, witness: [u64; 3]) {
     #[cfg(not(loom))]
-    self.backoff.snooze();
+    {
+      let _ = witness;
+      self.backoff.snooze();
+    }
     #[cfg(loom)]
     {
       let waits = self.waits.get() + 1;
@@ -122,6 +138,9 @@ impl Spin {
         waits <= LOOM_SPIN_LIMIT,
         "a spin outlived {LOOM_SPIN_LIMIT} waits under loom"
       );
+      if self.last.replace(Some(witness)) == Some(witness) {
+        loom::skip_branch();
+      }
       loom::thread::yield_now();
     }
   }

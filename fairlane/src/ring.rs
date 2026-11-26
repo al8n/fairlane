@@ -137,8 +137,12 @@ impl<T, S: Copy> Ring<T, S> {
     // The pop of the previous lap may still be reading the cell. `Acquire` pairs with its
     // `Release`, so its read happens before the write below.
     let spin = Spin::new();
-    while cell.sequence.load(Ordering::Acquire) != position {
-      spin.wait();
+    loop {
+      let sequence = cell.sequence.load(Ordering::Acquire);
+      if sequence == position {
+        break;
+      }
+      spin.wait([position, sequence, 0]);
     }
     cell.value.with_mut(|value| {
       // SAFETY: the compare-and-swap above made this thread the one owner of `position`, and the
@@ -169,7 +173,8 @@ impl<T, S: Copy> Ring<T, S> {
     loop {
       // Head first, then tail, both `SeqCst`: `head == tail` here means head and tail met at the
       // tail read's place in `S` (see the module's orderings).
-      let tail = self.tail.load(Ordering::SeqCst) & !MARK;
+      let observed = self.tail.load(Ordering::SeqCst);
+      let tail = observed & !MARK;
       if head >= tail {
         return None;
       }
@@ -210,7 +215,7 @@ impl<T, S: Copy> Ring<T, S> {
       } else if sequence < head + 1 {
         // The tail is past `head`, so a push owns `head` and has not published it yet, or the pop
         // of the previous lap has not handed the cell over. Either is a few instructions away.
-        spin.wait();
+        spin.wait([head, observed, sequence]);
         head = self.head.load(Ordering::SeqCst);
       } else {
         // Another pop took `head`.
