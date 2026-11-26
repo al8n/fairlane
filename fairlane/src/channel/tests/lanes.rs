@@ -323,3 +323,30 @@ fn a_woken_receive_whose_take_unwinds_wakes_the_next() {
     Poll::Ready(Ok(_))
   ));
 }
+
+/// A receive of one item makes no policy call after its take: a policy that panics on its second
+/// call never costs the item its first call chose, and the panic of a later receive loses nothing.
+#[test]
+fn a_single_receive_asks_the_policy_once() {
+  let policy = PanicsOnSecond(AtomicUsize::new(0));
+  let (tx, rx) = channel_with::<u32, Three, _>(three(4, false), policy).unwrap();
+  for item in 0..2 {
+    tx.try_send(Three::B, item).unwrap();
+    tx.try_send(Three::C, 10 + item).unwrap();
+  }
+  let first = rx.try_recv().unwrap().expect("items are queued");
+  assert_eq!((first.lane(), first.into_item()), (Three::B, 0));
+  assert_eq!(
+    rx.policy().0.load(Ordering::SeqCst),
+    1,
+    "one call for one item"
+  );
+  let unwound = catch_unwind(AssertUnwindSafe(|| rx.try_recv()));
+  assert!(unwound.is_err(), "the second receive's call panicked");
+  let snapshot = tx.snapshot();
+  assert_eq!(
+    snapshot.queued(Three::B) + snapshot.queued(Three::C),
+    3,
+    "the panic took no item"
+  );
+}

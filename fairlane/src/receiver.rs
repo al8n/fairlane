@@ -158,6 +158,10 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   /// 4. a lane that is not express is counted: its passed-over count to zero, and one more for
   ///    every other lane of the view.
   ///
+  /// A batch that holds as many items as its effective limit stops before it reads the lanes
+  /// again: no policy call comes after its last item, so a receive of one item makes none after
+  /// its take.
+  ///
   /// The room of every item taken is given back after the lock is let go, even on an unwind out of
   /// the policy, so that no waker runs under the lock.
   fn take_lanes(
@@ -178,7 +182,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     let mut now: Option<Y::Stamp> = None;
     let mut held = 0;
     let mut limit = quota.limit();
-    loop {
+    while held < limit {
       let mut waiting = PerLane::<bool, L>::filled(false);
       for index in (0..count).rev() {
         if !quota.admits_at(index) {
