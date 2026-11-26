@@ -8,10 +8,31 @@ publish = false
 description = "fairlane's benches against flume, crossbeam-channel, async-channel, kanal and tokio's mpsc. A member of its own, so that none of them enters fairlane's test, loom or miri builds."
 
 [dependencies]
-fairlane = { workspace = true }
+fairlane = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+async-channel = "2"
+criterion = { version = "0.8", features = ["cargo_bench_support"] }
+crossbeam-channel = "0.5"
+flume = "0.12"
+futures-lite = "2"
+kanal = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 
 [lints]
 workspace = true
 
 [lib]
 bench = false
+
+[[bench]]
+name = "throughput"
+harness = false
+
+[[bench]]
+name = "lanes"
+harness = false
+
+[[bench]]
+name = "latency"
+harness = false
