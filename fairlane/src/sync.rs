@@ -88,7 +88,16 @@ mod cell {
 pub(crate) struct Spin {
   #[cfg(not(loom))]
   backoff: crossbeam_utils::Backoff,
+  /// Under loom, the waits so far: a diagnostic for a spin that loom runs without end.
+  #[cfg(loom)]
+  waits: core::cell::Cell<u32>,
 }
+
+/// Under loom, the waits after which a spin is reported. Every spin of the crate waits for
+/// another thread's last few instructions, which loom schedules after one yield; a spin past this
+/// is a schedule loom runs without end, as two spinners run in turn, not a slow thread.
+#[cfg(loom)]
+const LOOM_SPIN_LIMIT: u32 = 64;
 
 impl Spin {
   #[inline]
@@ -96,6 +105,8 @@ impl Spin {
     Self {
       #[cfg(not(loom))]
       backoff: crossbeam_utils::Backoff::new(),
+      #[cfg(loom)]
+      waits: core::cell::Cell::new(0),
     }
   }
 
@@ -104,6 +115,14 @@ impl Spin {
     #[cfg(not(loom))]
     self.backoff.snooze();
     #[cfg(loom)]
-    loom::thread::yield_now();
+    {
+      let waits = self.waits.get() + 1;
+      self.waits.set(waits);
+      assert!(
+        waits <= LOOM_SPIN_LIMIT,
+        "a spin outlived {LOOM_SPIN_LIMIT} waits under loom"
+      );
+      loom::thread::yield_now();
+    }
   }
 }
