@@ -66,6 +66,7 @@ enum Waiter {
   Closed,
 }
 
+#[derive(Clone)]
 struct LaneModel<T, S> {
   capacity: usize,
   express: bool,
@@ -104,6 +105,7 @@ pub(crate) enum Choice<T, L> {
   Nothing,
 }
 
+#[derive(Clone)]
 pub(crate) struct Model<T, L: Lane, S> {
   lanes: Vec<LaneModel<T, S>>,
   passed_over: Vec<u32>,
@@ -398,6 +400,8 @@ impl<T, L: Lane, S: Copy> Model<T, L, S> {
     self.lanes.iter().all(|lane| lane.closed)
   }
 }
+
+pub(crate) mod check;
 
 #[cfg(test)]
 mod tests;
