@@ -1,36 +1,50 @@
 //! The one driver of the blocking doors: the awaited door's future, polled on this thread, which
 //! parks between polls. There is no second implementation of any wait.
 
-use core::{
-  future::Future,
-  pin::pin,
-  task::{Context, Poll, Waker},
-};
-use std::{sync::Arc, task::Wake};
+#[cfg(not(loom))]
+pub(crate) use self::std_driver::park_on;
 
-use crate::sync::thread;
+#[cfg(not(loom))]
+mod std_driver {
+  use core::{
+    future::Future,
+    pin::pin,
+    task::{Context, Poll, Waker},
+  };
+  use std::{sync::Arc, task::Wake, thread};
 
-struct Unparker(thread::Thread);
+  struct Unparker(thread::Thread);
 
-impl Wake for Unparker {
-  fn wake(self: Arc<Self>) {
-    self.0.unpark();
+  impl Wake for Unparker {
+    fn wake(self: Arc<Self>) {
+      self.0.unpark();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+      self.0.unpark();
+    }
   }
 
-  fn wake_by_ref(self: &Arc<Self>) {
-    self.0.unpark();
+  /// Polls `future` to its end on this thread, parking whenever it is pending.
+  pub(crate) fn park_on<F: Future>(future: F) -> F::Output {
+    let mut future = pin!(future);
+    let waker = Waker::from(Arc::new(Unparker(thread::current())));
+    let mut cx = Context::from_waker(&waker);
+    loop {
+      if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
+        return output;
+      }
+      thread::park();
+    }
   }
 }
 
-/// Polls `future` to its end on this thread, parking whenever it is pending.
-pub(crate) fn park_on<F: Future>(future: F) -> F::Output {
-  let mut future = pin!(future);
-  let waker = Waker::from(Arc::new(Unparker(thread::current())));
-  let mut cx = Context::from_waker(&waker);
-  loop {
-    if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
-      return output;
-    }
-    thread::park();
-  }
+/// Under loom, loom's own driver. loom 0.7's `thread::unpark` ends a wait on a loom `Mutex` while
+/// the mutex is still held (`rt/thread.rs`, `set_unparked`), where std's `unpark` leaves a mutex
+/// wait alone; a waker run by another thread under an event's list lock would then wake this
+/// thread out of its wait for that lock. `block_on`'s waker is a loom `Notify`, which ends only a
+/// wait on itself.
+#[cfg(loom)]
+pub(crate) fn park_on<F: core::future::Future>(future: F) -> F::Output {
+  loom::future::block_on(future)
 }

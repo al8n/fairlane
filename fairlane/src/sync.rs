@@ -2,21 +2,15 @@
 //! Everything that loom must see goes through here.
 
 #[cfg(not(loom))]
-pub(crate) use std::{
-  sync::{
-    Arc, Mutex, MutexGuard,
-    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-  },
-  thread,
+pub(crate) use std::sync::{
+  Arc, Mutex, MutexGuard,
+  atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 
 #[cfg(loom)]
-pub(crate) use loom::{
-  sync::{
-    Arc, Mutex, MutexGuard,
-    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-  },
-  thread,
+pub(crate) use loom::sync::{
+  Arc, Mutex, MutexGuard,
+  atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 
 /// Locks `mutex`, reading through a poison: every critical section of the crate leaves its state

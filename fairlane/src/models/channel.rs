@@ -73,10 +73,15 @@ fn mp2_a_late_try_reserve_never_passes_a_waiter() {
       let (tx, in_line, done) = (tx.clone(), in_line.clone(), done.clone());
       thread::spawn(move || {
         let mut reserve = tx.reserve(Single);
-        if poll_once(&mut reserve).is_pending() {
-          in_line.store(true, SeqCst);
+        // A reserve that resolved at once is not polled again: a resolved future never wakes.
+        let permit = match poll_once(&mut reserve) {
+          Poll::Ready(permit) => permit,
+          Poll::Pending => {
+            in_line.store(true, SeqCst);
+            block_on(reserve)
+          }
         }
-        let permit = block_on(reserve).unwrap();
+        .unwrap();
         done.store(true, SeqCst);
         drop(permit);
       })
