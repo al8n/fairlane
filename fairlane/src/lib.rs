@@ -13,6 +13,10 @@
 #![deny(unsafe_code)]
 #![cfg_attr(not(test), allow(dead_code))]
 
+#[cfg(feature = "test-util")]
+#[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
+pub use clock::ManualClock;
+pub use clock::{Clock, Moment, Monotonic};
 pub use lane::{Lane, PerLane, Single};
 pub use options::{LaneOptions, Malformed, Options};
 
@@ -49,6 +53,7 @@ pub use options::{LaneOptions, Malformed, Options};
 #[cfg_attr(docsrs, doc(cfg(feature = "derive")))]
 pub use fairlane_derive::Lane;
 
+mod clock;
 mod lane;
 mod options;
 
