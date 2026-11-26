@@ -2,11 +2,16 @@ use core::fmt;
 
 use crate::lane::{Lane, PerLane};
 
-/// A reading of a channel's queues.
+/// A reading of a channel's queues, lane by lane.
 ///
-/// Each number is exact at the instant it was read. The readings are taken one after another, at
-/// different instants, so a snapshot is not one atomic reading of the channel: `reserved` in
-/// particular is derived from three of them.
+/// - [`committed`](Self::committed), [`received`](Self::received),
+///   [`remaining`](Self::remaining), [`senders_waiting`](Self::senders_waiting) and
+///   [`receivers_waiting`](Self::receivers_waiting) are each one reading, exact at the instant it
+///   was taken. `committed` and `received` never go backward from one snapshot to the next.
+/// - [`queued`](Self::queued) and [`reserved`](Self::reserved) are derived from several of those
+///   readings, taken one after another while the lane may move, so each is an estimate: between 0
+///   and the lane's capacity, and exact while the lane is still.
+/// - The lanes are read one after another too, so a snapshot is not one instant of the channel.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Snapshot<L: Lane> {
   lanes: PerLane<Reading, L>,
@@ -30,14 +35,15 @@ impl<L: Lane> Snapshot<L> {
     Self { lanes, closed }
   }
 
-  /// Items committed to `lane` and not yet received.
+  /// Items committed to `lane` and not yet received: `committed` less `received`, at most the
+  /// lane's capacity. Derived.
   #[inline]
   pub fn queued(&self, lane: L) -> usize {
     self.lanes.get(lane).queued
   }
 
   /// Room held in `lane` by permits, and by reserves granted and not yet resumed: its capacity,
-  /// less what remains, less what is queued.
+  /// less what remains, less what is queued. Derived.
   #[inline]
   pub fn reserved(&self, lane: L) -> usize {
     self.lanes.get(lane).reserved

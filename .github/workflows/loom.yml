@@ -61,7 +61,8 @@ jobs:
           - { name: receivers, filter: "models::channel::ma", skip: "--skip models::channel::ma3" }
           - { name: ma3, filter: "models::channel::ma3", skip: "" }
           - { name: closes, filter: "models::channel::mc", skip: "" }
-          - { name: lanes, filter: "models::lanes::", skip: "" }
+          - { name: lanes, filter: "models::lanes::", skip: "--skip models::lanes::ms1" }
+          - { name: snapshot, filter: "models::lanes::ms1", skip: "" }
     steps:
       - uses: actions/checkout@v7
       - name: Cache cargo build and registry

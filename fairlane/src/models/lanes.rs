@@ -313,3 +313,49 @@ fn x2_small_histories_are_linearizable() {
     drop((tx, rx));
   });
 }
+
+/// A policy whose stamp is not zero-sized, so the receiving side moves each lane's oldest item
+/// through its lookahead.
+struct Stamped;
+
+impl crate::Policy<Three> for Stamped {
+  type Stamp = u8;
+
+  fn stamp(&self) -> u8 {
+    0
+  }
+
+  fn owed(&self, _: &crate::LaneView<Three, u8>) -> Option<Three> {
+    None
+  }
+}
+
+/// Snapshots beside receives that move items through the lookahead: `received` never goes
+/// backward from one snapshot to the next.
+#[test]
+fn ms1_received_never_goes_backward() {
+  model(|| {
+    let options = Options::from_fn(|_| LaneOptions::new(NonZeroUsize::MIN));
+    let (tx, rx) = channel_with::<u8, Three, Stamped>(options, Stamped).unwrap();
+    tx.try_send(Three::B, 1).unwrap();
+    tx.try_send(Three::C, 2).unwrap();
+    let receiver = thread::spawn(move || {
+      rx.try_recv().unwrap().unwrap();
+      rx.try_recv().unwrap().unwrap();
+      rx
+    });
+    let observer = thread::spawn(move || {
+      let first = tx.snapshot();
+      let second = tx.snapshot();
+      for lane in Three::ALL {
+        assert!(
+          first.received(lane) <= second.received(lane),
+          "received went backward on {lane:?}"
+        );
+      }
+      tx
+    });
+    let rx = receiver.join().unwrap();
+    drop((observer.join().unwrap(), rx));
+  });
+}

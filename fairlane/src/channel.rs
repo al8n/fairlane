@@ -22,7 +22,7 @@ use crate::{
   ring::{Refused, Ring},
   sender::Sender,
   snapshot::{Reading, Snapshot},
-  sync::{Arc, AtomicBool, AtomicUsize, Mutex, Ordering, lock},
+  sync::{Arc, AtomicBool, AtomicU64, AtomicUsize, Mutex, Ordering, lock},
   waiters::{Key, State, Waiters},
   wake::{Wakes, wake, wake_all},
 };
@@ -119,8 +119,16 @@ pub(crate) struct LaneState<T, S> {
   pub(crate) reserves: Reserves,
   pub(crate) arrivals: Arrivals,
   pub(crate) capacity: usize,
+  /// Whether the receiving side pops this lane's oldest item ahead, to read its stamp: a lane
+  /// that is not express, of a channel of two lanes or more, under a policy whose stamp is not
+  /// zero-sized.
+  pub(crate) lookahead: bool,
   /// 1 while the choice lock holds this lane's oldest item, popped to read its stamp; 0 else.
   pub(crate) ahead: AtomicUsize,
+  /// On a lane with a lookahead, every item taken out: the snapshot's `received`, stored by the
+  /// holder of the choice lock and by the last receiver's drain. On a lane without one, that is
+  /// the ring's head.
+  pub(crate) taken: AtomicU64,
 }
 
 impl<T, S> LaneState<T, S> {
@@ -181,7 +189,9 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
         reserves: Reserves::new(),
         arrivals: Arrivals::new(),
         capacity,
+        lookahead: stamped && size_of::<Y::Stamp>() != 0,
         ahead: AtomicUsize::new(0),
+        taken: AtomicU64::new(0),
       })
     })?;
     Ok(Self {
@@ -382,11 +392,20 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   pub(crate) fn snapshot(&self) -> Snapshot<L> {
     let readings = Array::from_fn(|index| {
       let state = self.lanes.at(index);
-      // An item the choice lock holds ahead is still queued: popped from the ring, not taken.
-      let ahead = state.ahead.load(Ordering::Relaxed) as u64;
-      let received = state.ring.received().saturating_sub(ahead);
+      // One reading each. An item the choice lock holds ahead is popped and not taken, so a lane
+      // with a lookahead counts its takes apart: its head moves at the pop, and `head - ahead`
+      // would rise and fall again across one move into the lookahead.
+      let received = if state.lookahead {
+        state.taken.load(Ordering::Relaxed)
+      } else {
+        state.ring.received()
+      };
       let committed = state.ring.committed();
-      let queued = usize::try_from(committed.saturating_sub(received)).unwrap_or(usize::MAX);
+      // Derived from two readings: received first, so that the difference is never below what
+      // was queued at the second; clamped to what the lane can hold.
+      let queued = usize::try_from(committed.saturating_sub(received))
+        .unwrap_or(usize::MAX)
+        .min(state.capacity);
       let remaining = free(state.remaining.load());
       Reading {
         queued,
@@ -436,7 +455,9 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
       let mut choice = lock(choice);
       for (index, slot) in choice.ahead.iter_mut().enumerate() {
         if let Some(popped) = slot.take() {
-          self.lanes.at(index).ahead.store(0, Ordering::Relaxed);
+          let state = self.lanes.at(index);
+          state.ahead.store(0, Ordering::Relaxed);
+          state.taken.store(popped.ordinal + 1, Ordering::Relaxed);
           ahead.push((index, popped.item));
         }
       }
@@ -449,6 +470,9 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     }
     for state in self.lanes.as_slice() {
       while let Some(popped) = state.ring.pop() {
+        if state.lookahead {
+          state.taken.store(popped.ordinal + 1, Ordering::Relaxed);
+        }
         wakers.extend(state.release());
         let item = popped.item;
         let _ = std::panic::catch_unwind(AssertUnwindSafe(move || drop(item)));

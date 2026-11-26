@@ -193,7 +193,6 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     // Dropped first, on every exit, an unwind out of the policy included.
     let _choosing = Choosing::enter(self.address());
     let choice = &mut *guard;
-    let stamps_matter = core::mem::size_of::<Y::Stamp>() != 0;
     let mut now: Option<Y::Stamp> = None;
     let mut held = 0;
     let mut limit = quota.limit();
@@ -206,7 +205,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
         let state = self.lane_at(index);
         let ahead = &mut choice.ahead[index];
         let mut holds = ahead.is_some() || !state.ring.is_empty();
-        if holds && ahead.is_none() && stamps_matter && !self.is_express_at(index) {
+        if holds && ahead.is_none() && state.lookahead {
           // The oldest stamp is read from the item itself: pop it ahead. Only this lock's holder
           // pops, so the ring keeps the item it showed.
           *ahead = state.ring.pop();
@@ -273,6 +272,11 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
           None => break,
         },
       };
+      if state.lookahead {
+        // Stored only by this lock's holder, in ordinal order: the snapshot's `received` never
+        // goes backward.
+        state.taken.store(popped.ordinal + 1, Ordering::Relaxed);
+      }
       back.units.as_mut_slice()[chosen] += 1;
       held += 1;
       limit = limit.min(lane_limit);
