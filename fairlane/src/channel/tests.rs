@@ -269,3 +269,6 @@ fn a_capacity_that_cannot_be_held_is_refused() {
 }
 
 mod differential;
+#[cfg(feature = "test-util")]
+mod differential_lanes;
+mod lanes;

@@ -14,6 +14,12 @@
 //!
 //! A grant decided for a waiter that leaves before its notification lands reaches nobody:
 //! `notify` answers 0, and the unit is released again from the top.
+//!
+//! `event.listen()` runs under the line lock: it inserts a listener and runs no foreign code. This
+//! assumes what wakers are expected to do: `wake` schedules its task and never polls it inline.
+//! event-listener runs wakers inside its own list lock, so a waker that polled inline would take
+//! that lock again on its first listener poll and deadlock event-listener by itself; taking
+//! `listen()` out of the line lock would therefore remove no deadlock.
 
 use event_listener::{Event, EventListener, IntoNotification, Listener};
 

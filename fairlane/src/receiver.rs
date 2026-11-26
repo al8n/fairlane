@@ -11,13 +11,14 @@ use hybrid_array::Array;
 
 use crate::{
   channel::Shared,
+  choice::{Choice, choose, count as count_choice, fits},
   error::Ended,
-  lane::{Lane, PerLane, Single},
+  lane::{Lane, PerLane, Single, lane_count},
   park::park_on,
-  policy::{DefaultPolicy, Policy},
+  policy::{DefaultPolicy, LaneView, Policy},
   quota::Quota,
   snapshot::Snapshot,
-  sync::Arc,
+  sync::{Arc, Mutex, Ordering, lock},
 };
 
 /// The receiving half of a channel. Clones share the channel: each item goes to one receive.
@@ -109,12 +110,21 @@ pub(crate) enum Took {
 }
 
 impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
-  /// One receive under `quota`, without waiting: every item it takes goes to `sink` at once.
+  /// One receive under `quota`, without waiting: every item it takes goes to `sink` at once, before
+  /// the next choice, so an unwind out of a policy never drops an item that was taken.
   pub(crate) fn take(&self, quota: &Quota<L>, sink: &mut impl FnMut(Received<T, L>)) -> Took {
+    match self.choice() {
+      None => self.take_one_lane(quota, sink),
+      Some(choice) => self.take_lanes(choice, quota, sink),
+    }
+  }
+
+  /// A channel of one lane: pops, and no lock.
+  fn take_one_lane(&self, quota: &Quota<L>, sink: &mut impl FnMut(Received<T, L>)) -> Took {
     let state = self.lane_at(0);
     let lane_limit = quota.limit_at(0);
     let mut held = 0;
-    while crate::choice::fits(held, quota.limit(), lane_limit) {
+    while fits(held, quota.limit(), lane_limit) {
       let Some(popped) = state.ring.pop() else {
         break;
       };
@@ -133,12 +143,172 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     }
   }
 
-  /// After a receive that took items and stopped: where items are left in a lane the quota
-  /// admits, one more waiting receiver of that lane is woken.
+  /// A channel of two lanes or more: one receiver chooses at a time, under the choice lock, for a
+  /// whole batch. For each item:
+  ///
+  /// 1. the lanes the quota admits are read, LOWEST priority first: whether each holds an item,
+  ///    how many, and the stamp of its oldest. Only the lock's holder pops, so a lane can gain
+  ///    items and not lose any: a lane read as empty was empty from the lock's taking until its
+  ///    read, and every lane above the chosen one was found empty after it was;
+  /// 2. the first express lane that holds an item is chosen; else the lane the policy says is owed;
+  ///    else the first lane that holds an item;
+  /// 3. where taking it would break the chosen lane's limit, the batch STOPS: it never takes
+  ///    another lane instead;
+  /// 4. a lane that is not express is counted: its passed-over count to zero, and one more for
+  ///    every other lane of the view.
+  ///
+  /// The room of every item taken is given back after the lock is let go, even on an unwind out of
+  /// the policy, so that no waker runs under the lock.
+  fn take_lanes(
+    &self,
+    choice: &Mutex<Choice<T, L, Y::Stamp>>,
+    quota: &Quota<L>,
+    sink: &mut impl FnMut(Received<T, L>),
+  ) -> Took {
+    let count = lane_count::<L>();
+    // Declared before the guard, so that it is dropped after it.
+    let mut back = RoomBack {
+      shared: self,
+      units: PerLane::filled(0),
+    };
+    let mut guard = lock(choice);
+    let choice = &mut *guard;
+    let stamps_matter = core::mem::size_of::<Y::Stamp>() != 0;
+    let mut now: Option<Y::Stamp> = None;
+    let mut held = 0;
+    let mut limit = quota.limit();
+    loop {
+      let mut waiting = PerLane::<bool, L>::filled(false);
+      for index in (0..count).rev() {
+        if !quota.admits_at(index) {
+          continue;
+        }
+        let state = self.lane_at(index);
+        let ahead = &mut choice.ahead.as_mut_slice()[index];
+        let mut holds = ahead.is_some() || !state.ring.is_empty();
+        if holds && ahead.is_none() && stamps_matter && !self.is_express_at(index) {
+          // The oldest stamp is read from the item itself: pop it ahead. Only this lock's holder
+          // pops, so the ring keeps the item it showed.
+          *ahead = state.ring.pop();
+          holds = ahead.is_some();
+          if holds {
+            state.ahead.store(1, Ordering::Relaxed);
+          }
+        }
+        waiting.as_mut_slice()[index] = holds;
+      }
+      let express =
+        (0..count).find(|&index| waiting.as_slice()[index] && self.is_express_at(index));
+      let mut view = None;
+      let chosen = match express {
+        Some(index) => index,
+        None => {
+          // The view: the admitted lanes that hold an item and are not express.
+          let in_view = |index: usize| waiting.as_slice()[index] && !self.is_express_at(index);
+          let mut lanes = (0..count).filter(|&index| in_view(index));
+          let Some(first) = lanes.next() else {
+            break;
+          };
+          if lanes.next().is_none() {
+            first
+          } else {
+            let now = *now.get_or_insert_with(|| self.policy().stamp());
+            let mut lane_view = LaneView::new(now);
+            for index in (0..count).filter(|&index| in_view(index)) {
+              let state = self.lane_at(index);
+              let ahead = choice.ahead.as_slice()[index].as_ref();
+              let queued = state
+                .ring
+                .committed()
+                .saturating_sub(state.ring.received())
+                .saturating_add(u64::from(ahead.is_some()));
+              lane_view = lane_view.with_lane(
+                self.name(index),
+                usize::try_from(queued).unwrap_or(usize::MAX),
+                ahead.and_then(|popped| popped.stamp),
+                *choice.passed_over.at(index),
+              );
+            }
+            let owed = choose(&lane_view, self.policy()).map_or(first, Lane::index);
+            view = Some(lane_view);
+            if owed < count && in_view(owed) {
+              owed
+            } else {
+              first
+            }
+          }
+        }
+      };
+
+      let lane_limit = quota.limit_at(chosen);
+      if !fits(held, limit, lane_limit) {
+        break;
+      }
+      let state = self.lane_at(chosen);
+      let popped = match choice.ahead.as_mut_slice()[chosen].take() {
+        Some(popped) => {
+          state.ahead.store(0, Ordering::Relaxed);
+          popped
+        }
+        None => match state.ring.pop() {
+          Some(popped) => popped,
+          None => break,
+        },
+      };
+      held += 1;
+      limit = limit.min(lane_limit);
+      if express.is_none() {
+        match &view {
+          Some(view) => count_choice(&mut choice.passed_over, self.name(chosen), view),
+          None => choice.passed_over.as_mut_slice()[chosen] = 0,
+        }
+      }
+      back.units.as_mut_slice()[chosen] += 1;
+      sink(Received {
+        item: popped.item,
+        lane: self.name(chosen),
+        ordinal: popped.ordinal,
+      });
+    }
+    match NonZeroUsize::new(held) {
+      Some(held) => Took::Items(held),
+      None => {
+        let ended = (0..count)
+          .filter(|&index| quota.admits_at(index))
+          .all(|index| {
+            choice.ahead.as_slice()[index].is_none() && self.lane_at(index).ring.is_ended()
+          });
+        if ended { Took::Ended } else { Took::Nothing }
+      }
+    }
+  }
+
+  /// After a receive that took items: where items are left in a lane the quota admits, one more
+  /// waiting receiver of that lane is woken. Every admitted lane is looked at, not only the one
+  /// this receive woke on.
   pub(crate) fn chain(&self, quota: &Quota<L>) {
-    let state = self.lane_at(0);
-    if quota.admits_at(0) && !state.ring.is_empty() {
-      state.arrivals.wake_one();
+    for index in 0..lane_count::<L>() {
+      let state = self.lane_at(index);
+      let holds = state.ahead.load(Ordering::Relaxed) != 0 || !state.ring.is_empty();
+      if quota.admits_at(index) && holds {
+        state.arrivals.wake_one();
+      }
+    }
+  }
+}
+
+/// The room of the items one receive took, given back when it is dropped: after the choice lock.
+struct RoomBack<'a, T, L: Lane, Y: Policy<L>> {
+  shared: &'a Shared<T, L, Y>,
+  units: PerLane<usize, L>,
+}
+
+impl<T, L: Lane, Y: Policy<L>> Drop for RoomBack<'_, T, L, Y> {
+  fn drop(&mut self) {
+    for (index, units) in self.units.as_slice().iter().enumerate() {
+      for _ in 0..*units {
+        self.shared.lane_at(index).release();
+      }
     }
   }
 }

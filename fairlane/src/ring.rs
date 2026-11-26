@@ -50,7 +50,6 @@ pub(crate) struct Popped<T, S> {
   pub(crate) ordinal: u64,
   pub(crate) item: T,
   /// `None` for a ring made without stamps.
-  #[cfg_attr(not(test), allow(dead_code))]
   pub(crate) stamp: Option<S>,
 }
 

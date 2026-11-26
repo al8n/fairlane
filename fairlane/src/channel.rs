@@ -7,6 +7,7 @@ use hybrid_array::Array;
 
 use crate::{
   arrivals::Arrivals,
+  choice::Choice,
   lane::{Lane, PerLane, Single, lane_count},
   options::{LaneOptions, Malformed, Options},
   policy::{DefaultPolicy, Policy},
@@ -16,8 +17,58 @@ use crate::{
   ring::Ring,
   sender::Sender,
   snapshot::{Reading, Snapshot},
-  sync::{Arc, AtomicBool, AtomicUsize, Ordering},
+  sync::{Arc, AtomicBool, AtomicUsize, Mutex, Ordering, lock},
 };
+
+/// A channel of several lanes, with the default policy: a count and a time, whichever comes first
+/// ([`DefaultPolicy`]).
+///
+/// # Errors
+///
+/// [`Malformed`], by name: no lane; a [`Lane`] whose indices do not round-trip; an express lane
+/// behind one that is not; a capacity that cannot be held as a ring.
+///
+/// ```
+/// use core::num::NonZeroUsize;
+///
+/// use fairlane::{Lane, LaneOptions, Options};
+///
+/// # #[cfg(feature = "derive")] {
+/// #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Lane)]
+/// enum Urgency {
+///   Interactive,
+///   Batch,
+/// }
+///
+/// let options = Options::from_fn(|lane| match lane {
+///   Urgency::Interactive => LaneOptions::new(NonZeroUsize::new(64).unwrap()),
+///   Urgency::Batch => LaneOptions::new(NonZeroUsize::new(1024).unwrap()),
+/// });
+/// let (tx, rx) = fairlane::channel::<&str, Urgency>(options)?;
+/// tx.send_blocking(Urgency::Batch, "later")?;
+/// tx.send_blocking(Urgency::Interactive, "now")?;
+/// assert_eq!(rx.recv_blocking()?.into_item(), "now");
+/// assert_eq!(rx.recv_blocking()?.into_item(), "later");
+/// # }
+/// # Ok::<(), Box<dyn core::error::Error>>(())
+/// ```
+pub fn channel<T, L: Lane>(
+  options: Options<L>,
+) -> Result<Halves<T, L, DefaultPolicy<L>>, Malformed> {
+  pair(&options, DefaultPolicy::default())
+}
+
+/// A channel of several lanes, with `policy` against starvation.
+///
+/// # Errors
+///
+/// As [`channel`].
+pub fn channel_with<T, L: Lane, Y: Policy<L>>(
+  options: Options<L>,
+  policy: Y,
+) -> Result<Halves<T, L, Y>, Malformed> {
+  pair(&options, policy)
+}
 
 /// A bounded channel of one lane, with the default policy, which a channel of one lane never
 /// consults.
@@ -61,6 +112,8 @@ pub(crate) struct LaneState<T, S> {
   pub(crate) reserves: Reserves,
   pub(crate) arrivals: Arrivals,
   pub(crate) capacity: usize,
+  /// 1 while the choice lock holds this lane's oldest item, popped to read its stamp; 0 else.
+  pub(crate) ahead: AtomicUsize,
 }
 
 impl<T, S: Copy> LaneState<T, S> {
@@ -76,6 +129,11 @@ pub(crate) struct Shared<T, L: Lane, Y: Policy<L>> {
   /// Each index's lane, read once at the construction: the receiving side never calls back into
   /// `Lane` to name an item's lane.
   names: PerLane<L, L>,
+  /// Each lane's express flag, as the options resolved it.
+  express: PerLane<bool, L>,
+  /// The receiving side's lock, for two lanes or more: the passed-over counts and the lookahead.
+  /// Senders never take it.
+  choice: Option<Mutex<Choice<T, L, Y::Stamp>>>,
   policy: Y,
   senders: AtomicUsize,
   receivers: AtomicUsize,
@@ -88,20 +146,27 @@ pub(crate) struct Shared<T, L: Lane, Y: Policy<L>> {
 impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   fn new(options: &Options<L>, policy: Y) -> Result<Self, Malformed> {
     options.check()?;
-    let stamped = lane_count::<L>() >= 2;
-    let lanes = Array::try_from_fn(|index| {
+    let lanes = lane_count::<L>() >= 2;
+    let express = PerLane::from_array(Array::from_fn(|index| options.is_express_at(index)));
+    let states = Array::try_from_fn(|index| {
       let capacity = options.lane_at(index).capacity().get();
+      // A stamp matters only to the policy, which never sees an express lane, nor the one lane
+      // of a channel of one.
+      let stamped = lanes && !*express.at(index);
       Ok(LaneState {
         ring: Ring::new(capacity, stamped).ok_or(Malformed::Capacity(index))?,
         remaining: Remaining::new(capacity),
         reserves: Reserves::new(),
         arrivals: Arrivals::new(),
         capacity,
+        ahead: AtomicUsize::new(0),
       })
     })?;
     Ok(Self {
-      lanes: PerLane::from_array(lanes),
+      lanes: PerLane::from_array(states),
       names: PerLane::from_fn(|lane| lane),
+      express,
+      choice: lanes.then(|| Mutex::new(Choice::new())),
       policy,
       senders: AtomicUsize::new(1),
       receivers: AtomicUsize::new(1),
@@ -124,6 +189,18 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   #[inline]
   pub(crate) fn name(&self, index: usize) -> L {
     *self.names.at(index)
+  }
+
+  /// Whether lane `index` is express.
+  #[inline]
+  pub(crate) fn is_express_at(&self, index: usize) -> bool {
+    *self.express.at(index)
+  }
+
+  /// The choice lock, for a channel of two lanes or more.
+  #[inline]
+  pub(crate) fn choice(&self) -> Option<&Mutex<Choice<T, L, Y::Stamp>>> {
+    self.choice.as_ref()
   }
 
   #[inline]
@@ -183,7 +260,9 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   pub(crate) fn snapshot(&self) -> Snapshot<L> {
     let readings = Array::from_fn(|index| {
       let state = self.lanes.at(index);
-      let received = state.ring.received();
+      // An item the choice lock holds ahead is still queued: popped from the ring, not taken.
+      let ahead = state.ahead.load(Ordering::Relaxed) as u64;
+      let received = state.ring.received().saturating_sub(ahead);
       let committed = state.ring.committed();
       let queued = usize::try_from(committed.saturating_sub(received)).unwrap_or(usize::MAX);
       let remaining = free(state.remaining.load());
@@ -225,6 +304,21 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
       return;
     }
     self.close();
+    let mut ahead = Vec::new();
+    if let Some(choice) = &self.choice {
+      let mut choice = lock(choice);
+      for (index, slot) in choice.ahead.as_mut_slice().iter_mut().enumerate() {
+        if let Some(popped) = slot.take() {
+          self.lanes.at(index).ahead.store(0, Ordering::Relaxed);
+          ahead.push((index, popped.item));
+        }
+      }
+    }
+    // Each item is dropped after the choice lock is let go, under its own catch.
+    for (index, item) in ahead {
+      self.lanes.at(index).release();
+      let _ = std::panic::catch_unwind(AssertUnwindSafe(move || drop(item)));
+    }
     for state in self.lanes.as_slice() {
       while let Some(popped) = state.ring.pop() {
         state.release();
