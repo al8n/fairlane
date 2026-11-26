@@ -14,11 +14,14 @@ description = "A bounded multi-lane MPMC channel: a bound per lane, an anti-star
 
 [features]
 default = []
+# `#[derive(Lane)]`, re-exported beside the trait.
+derive = ["dep:fairlane-derive"]
 # `Serialize` and `Deserialize` for `LaneOptions`, `Options` and `PerLane`: a map keyed by
 # `Lane::as_str`, every lane required.
 serde = ["dep:serde_core"]
 
 [dependencies]
+fairlane-derive = { workspace = true, optional = true }
 hybrid-array = "0.4"
 # `const-generics` gives `typenum::U<N>`, which the derive's output names.
 typenum = { version = "1", features = ["const-generics"] }
@@ -27,6 +30,7 @@ serde_core = { version = "1", optional = true, default-features = false }
 
 [dev-dependencies]
 serde_json = "1"
+trybuild = "1"
 
 [lints]
 workspace = true
@@ -34,6 +38,16 @@ workspace = true
 # Without `bench = false`, `cargo bench` also builds the lib under libtest's bench harness.
 [lib]
 bench = false
+
+[[test]]
+name = "derive_ui"
+path = "tests/derive_ui.rs"
+required-features = ["derive"]
+
+[[test]]
+name = "derive"
+path = "tests/derive.rs"
+required-features = ["derive"]
 
 [package.metadata.docs.rs]
 all-features = true

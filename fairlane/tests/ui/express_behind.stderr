@@ -1,0 +1,5 @@
+error: an express lane must come before every lane that is not express
+ --> tests/ui/express_behind.rs:4:14
+  |
+4 |   #[fairlane(express)]
+  |              ^^^^^^^

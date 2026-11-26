@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["fairlane", "fairlane-bench"]
+members = ["fairlane", "fairlane-derive", "fairlane-bench"]
 
 [workspace.package]
 version = "0.1.0"
@@ -16,6 +16,7 @@ categories = ["concurrency", "asynchronous", "data-structures"]
 
 [workspace.dependencies]
 fairlane = { version = "0.1", path = "fairlane", default-features = false }
+fairlane-derive = { version = "0.1", path = "fairlane-derive" }
 
 [workspace.lints.rust]
 rust_2018_idioms = "warn"

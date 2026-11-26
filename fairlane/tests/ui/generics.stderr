@@ -1,0 +1,5 @@
+error: `Lane` cannot be derived for an enum with generic parameters
+ --> tests/ui/generics.rs:2:13
+  |
+2 | enum Urgency<const N: usize> {
+  |             ^^^^^^^^^^^^^^^^
