@@ -2,10 +2,14 @@
 //! the like. The channel may answer wrongly for such a caller, but it never writes to a lane it
 //! holds no room in, and loses no item and no room.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::{
+  panic::AssertUnwindSafe,
+  sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+};
+use std::panic::catch_unwind;
 
 use super::*;
-use crate::{Strict, lane::Lane};
+use crate::{LaneView, Policy, Strict, lane::Lane, testing::Three};
 
 /// A lane whose `index` answers from a switch: it passes the round trip at construction and
 /// changes its answer later.
@@ -71,4 +75,61 @@ fn a_permit_keeps_the_lane_it_reserved() {
     (received.lane(), received.ordinal(), received.into_item()),
     (Fickle::A, 0, 7)
   );
+}
+
+/// A stamp policy whose `stamp` panics while armed, and counts its calls.
+#[derive(Default)]
+struct Stamping {
+  armed: AtomicBool,
+  stamps: AtomicUsize,
+}
+
+impl Policy<Three> for Stamping {
+  type Stamp = u64;
+
+  fn stamp(&self) -> u64 {
+    self.stamps.fetch_add(1, Ordering::SeqCst);
+    if self.armed.load(Ordering::SeqCst) {
+      panic!("a stamp that panics");
+    }
+    0
+  }
+
+  fn owed(&self, _: &LaneView<Three, u64>) -> Option<Three> {
+    None
+  }
+}
+
+fn stamped() -> (Sender<u32, Three, Stamping>, Receiver<u32, Three, Stamping>) {
+  let options = Options::from_fn(|_| LaneOptions::new(cap(1)));
+  channel_with(options, Stamping::default()).unwrap()
+}
+
+/// A `stamp` that panics during a permit's send gives the permit's room back: nothing was
+/// committed, and the lane's one unit is free again.
+#[test]
+fn a_stamp_that_panics_gives_the_room_back() {
+  let (tx, _rx) = stamped();
+  let permit = tx.try_reserve(Three::B).unwrap();
+  tx.policy().armed.store(true, Ordering::SeqCst);
+  let sent = catch_unwind(AssertUnwindSafe(move || permit.send(1)));
+  tx.policy().armed.store(false, Ordering::SeqCst);
+  assert!(sent.is_err(), "the stamp panicked");
+  let snapshot = tx.snapshot();
+  assert_eq!(
+    (snapshot.queued(Three::B), snapshot.remaining(Three::B)),
+    (0, 1)
+  );
+  assert!(tx.try_reserve(Three::B).is_ok());
+}
+
+/// A permit sent after the channel closed hands its item back without calling `stamp`.
+#[test]
+fn a_send_after_the_close_calls_no_stamp() {
+  let (tx, _rx) = stamped();
+  let permit = tx.try_reserve(Three::B).unwrap();
+  assert!(tx.close());
+  tx.policy().armed.store(true, Ordering::SeqCst);
+  assert_eq!(permit.send(5), Err(SendError(5)));
+  assert_eq!(tx.policy().stamps.load(Ordering::SeqCst), 0);
 }

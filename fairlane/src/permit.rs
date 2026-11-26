@@ -98,7 +98,9 @@ impl<T, L: Lane, Y: Policy<L>> OwnedPermit<T, L, Y> {
     self.lane
   }
 
-  /// [`Permit::send`], for an owned permit. Its sender goes once the item is committed.
+  /// [`Permit::send`], for an owned permit. Its sender goes once the item is committed. Where it
+  /// was the last sender, that closes the channel, and a waker the close runs that panics unwinds
+  /// out of this call with the item already committed.
   pub fn send(mut self, item: T) -> Result<(), SendError<T>> {
     match self.sender.take() {
       Some(sender) => Permit::new(sender.shared(), self.index, self.lane).send(item),

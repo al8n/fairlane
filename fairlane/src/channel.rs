@@ -1,6 +1,7 @@
 //! What the two halves share, and the constructors.
 
 use core::{
+  mem,
   num::NonZeroUsize,
   panic::AssertUnwindSafe,
   task::{Poll, Waker},
@@ -131,6 +132,17 @@ impl<T, S> LaneState<T, S> {
   }
 }
 
+/// A permit's unit while its commit runs: given back when dropped, as on a refused push or an
+/// unwind out of the policy's `stamp`, and forgotten once the push claims its position, where the
+/// unit becomes the item's room.
+struct Refund<'a, T, S>(&'a LaneState<T, S>);
+
+impl<T, S> Drop for Refund<'_, T, S> {
+  fn drop(&mut self) {
+    wake(self.0.release());
+  }
+}
+
 pub(crate) struct Shared<T, L: Lane, Y: Policy<L>> {
   lanes: PerLane<LaneState<T, Y::Stamp>, L>,
   /// Each index's lane, read once at the construction: the receiving side never calls back into
@@ -222,16 +234,20 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   }
 
   /// Commits `item` through a permit of lane `index`, or hands it back where the lane closed after
-  /// the permit was granted; the permit's room is let go then.
+  /// the permit was granted; the permit's room is let go then, and also where the policy's `stamp`
+  /// unwinds before the commit.
   pub(crate) fn commit(&self, index: usize, item: T) -> Result<(), T> {
     let state = self.lane_at(index);
+    let refund = Refund(state);
     match state.ring.push(item, || self.policy.stamp()) {
       Ok(_) => {
+        // The unit is the item's room now, and the receiver's waker runs after this.
+        mem::forget(refund);
         wake(state.arrivals.wake_one());
         Ok(())
       }
       Err(item) => {
-        wake(state.release());
+        drop(refund);
         Err(item)
       }
     }

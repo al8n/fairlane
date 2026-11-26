@@ -119,12 +119,17 @@ impl<T, S: Copy> Ring<T, S> {
   /// closed, nothing is committed and the item comes back.
   ///
   /// A stamped ring calls `stamp` once, just before the commit; an unstamped ring never calls it.
+  /// A ring closed before the push began never calls it: the mark is read first, and a close that
+  /// happens before the push is seen by that read, by coherence.
   ///
   /// The caller holds room for the item. Without it the push would still be sound, since a ring has
   /// at least two cells, and would wait for a pop to free its cell.
   pub(crate) fn push(&self, item: T, stamp: impl FnOnce() -> S) -> Result<u64, T> {
-    let stamp = self.stamps.is_some().then(stamp);
     let mut tail = self.tail.load(Ordering::Relaxed);
+    if tail & MARK != 0 {
+      return Err(item);
+    }
+    let stamp = self.stamps.is_some().then(stamp);
     let position = loop {
       if tail & MARK != 0 {
         return Err(item);
