@@ -1,4 +1,4 @@
-//! One lane's queue: a bounded, lock-free FIFO for many pushers and many poppers.
+//! One lane's queue: a bounded FIFO for many pushers and many poppers, which takes no lock.
 //!
 //! It is Vyukov's bounded queue with two additions: the close mark is the top bit of the tail, and
 //! each cell may carry a stamp beside its item.
@@ -35,6 +35,10 @@
 //!   lets a load read a write that comes later in its interleaving.
 //! - **The close** sets the mark with one `fetch_or`. A push's compare-and-swap expects an unmarked
 //!   tail, so no push is committed after the mark; one that loses to it gets its item back.
+//! - **Progress.** No operation takes a lock, and none is lock-free in the formal sense: a push or a
+//!   pop descheduled after it claims its position, and before it publishes the cell, holds up the
+//!   pop of that position, or the next lap's push into that cell. That one spins, then yields its
+//!   thread, until the claimer runs again.
 
 use core::{alloc::Layout, mem::MaybeUninit};
 
