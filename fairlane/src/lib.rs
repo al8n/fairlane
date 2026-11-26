@@ -4,3 +4,7 @@
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
 #![cfg_attr(not(test), allow(dead_code))]
+
+pub use lane::{Lane, PerLane, Single};
+
+mod lane;
