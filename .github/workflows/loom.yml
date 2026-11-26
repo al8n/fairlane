@@ -56,7 +56,8 @@ jobs:
       matrix:
         group:
           - { name: ring, filter: "models::ring::", skip: "" }
-          - { name: reserves, filter: "models::channel::mp", skip: "" }
+          - { name: mp1, filter: "models::channel::mp1", skip: "" }
+          - { name: reserves, filter: "models::channel::mp", skip: "--skip models::channel::mp1" }
           - { name: receivers, filter: "models::channel::ma", skip: "--skip models::channel::ma3" }
           - { name: ma3, filter: "models::channel::ma3", skip: "" }
           - { name: closes, filter: "models::channel::mc", skip: "" }

@@ -3,10 +3,7 @@
 use core::num::NonZeroUsize;
 
 use loom::{
-  sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering::SeqCst},
-  },
+  sync::{Arc, atomic::Ordering::SeqCst},
   thread,
 };
 
@@ -177,24 +174,21 @@ fn mt2_two_batches_never_interleave() {
   });
 }
 
-/// MT3 (O3): sender A commits to lane A and returns; then sender B commits to lane B; a receiver
-/// beside them never returns B's item while A's is queued.
+/// MT3 (O3): sender A commits to lane A and returns; then sender B, which joins A first, commits
+/// to lane B; a receiver beside them never returns B's item while A's is queued. B joins A rather
+/// than spin on a flag: under loom, two threads that yield can be run in turn forever.
 #[test]
 fn mt3_a_later_commit_to_a_lower_lane_is_not_taken_first() {
   model(|| {
     let (tx, rx) = lanes(false);
-    let first_done = Arc::new(AtomicBool::new(false));
     let a = {
-      let (tx, first_done) = (tx.clone(), first_done.clone());
+      let tx = tx.clone();
       thread::spawn(move || {
         tx.try_send(Three::A, 1).unwrap();
-        first_done.store(true, SeqCst);
       })
     };
     let b = thread::spawn(move || {
-      while !first_done.load(SeqCst) {
-        thread::yield_now();
-      }
+      a.join().unwrap();
       tx.try_send(Three::B, 2).unwrap();
       tx
     });
@@ -202,7 +196,6 @@ fn mt3_a_later_commit_to_a_lower_lane_is_not_taken_first() {
       let first = rx.recv_blocking().unwrap().into_item();
       (first, rx)
     });
-    a.join().unwrap();
     let tx = b.join().unwrap();
     let (first, rx) = receiver.join().unwrap();
     assert_eq!(first, 1, "B's item was taken while A's was queued");
