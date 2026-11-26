@@ -1,0 +1,66 @@
+name: loom
+
+# ── THE MODEL CHECKER ───────────────────────────────────────────────────────────────────────
+#
+# The loom models in `fairlane/src/models`: every interleaving of two or three threads over the
+# crate's atomics and cells, within a preemption bound of 3. They are what gates the ring's
+# `unsafe` and the channel's waits, beside Miri. A workflow of its own because `--cfg loom`
+# rebuilds the whole graph, and a model's state space sets its own clock, so it does not share a
+# verdict with the merge gate.
+#
+# `release.yml` requires it to be green on the commit it releases.
+#
+# `--release`, as loom asks: the models run far faster optimised. `-Dwarnings` is not set: lints
+# are `ci.yml`'s business, and this lane reports interleavings.
+
+# Triggers, `paths-ignore` and the concurrency group are `ci.yml`'s; its comments say why.
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'COPYRIGHT'
+      - 'LICENSE-*'
+      - '**.txt'
+  pull_request:
+    paths-ignore:
+      - 'COPYRIGHT'
+      - 'LICENSE-*'
+      - '**.txt'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || '' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUSTFLAGS: --cfg loom
+  LOOM_MAX_PREEMPTIONS: 3
+
+jobs:
+  loom:
+    name: loom
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Cache cargo build and registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-loom-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-loom-
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable
+      # `--lib models`: the other unit tests compile under `--cfg loom` too, but they run outside a
+      # loom model, where loom's atomics refuse to be used.
+      - name: cargo test -p fairlane --features loom,test-util --release --lib models
+        run: cargo test -p fairlane --features loom,test-util --release --lib models -- --nocapture

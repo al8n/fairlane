@@ -23,15 +23,22 @@ serde = ["dep:serde_core"]
 either = ["dep:either"]
 # `ManualClock`, a clock a test sets.
 test-util = []
+# Builds the crate's atomics and cells on loom, for the models in `src/models`. It takes effect
+# only under `--cfg loom`.
+loom = ["dep:loom"]
 
 [dependencies]
 fairlane-derive = { workspace = true, optional = true }
+crossbeam-utils = "0.8"
 hybrid-array = "0.4"
 # `const-generics` gives `typenum::U<N>`, which the derive's output names.
 typenum = { version = "1", features = ["const-generics"] }
 
 either = { version = "1", optional = true, default-features = false }
 serde_core = { version = "1", optional = true, default-features = false }
+
+[target.'cfg(loom)'.dependencies]
+loom = { version = "0.7", optional = true }
 
 [dev-dependencies]
 serde_json = "1"

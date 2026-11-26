@@ -5,6 +5,9 @@
 #![deny(unsafe_code)]
 #![cfg_attr(not(test), allow(dead_code))]
 
+#[cfg(all(loom, not(feature = "loom")))]
+compile_error!("`--cfg loom` builds fairlane on loom, which needs fairlane's `loom` feature");
+
 #[cfg(not(target_has_atomic = "64"))]
 compile_error!(
   "fairlane needs 64-bit atomics: a ring position, which is an item's ordinal, is an `AtomicU64`"
@@ -64,9 +67,14 @@ mod lane;
 mod options;
 mod policy;
 mod quota;
+#[allow(unsafe_code)]
+mod ring;
+mod sync;
 
 #[cfg(test)]
 mod model;
+#[cfg(all(test, loom))]
+mod models;
 #[cfg(test)]
 mod testing;
 

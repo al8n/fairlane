@@ -24,8 +24,9 @@ name: Release
 #
 #   * the tagged commit is on `main`;
 #   * every workflow in REQUIRED_WORKFLOWS has a green run on `main` for that exact commit. That is
-#     `ci.yml`, the two Miri workflows, `macos.yml` and `windows.yml`. A paused workflow has no such
-#     run: enable it, and run it on `main` (`gh workflow run macos.yml --ref main`) before tagging.
+#     `ci.yml`, the two Miri workflows, `macos.yml`, `windows.yml` and `loom.yml`. A paused
+#     workflow has no such run: enable it, and run it on `main` (`gh workflow run macos.yml --ref
+#     main`) before tagging.
 #     Drop a lane the crate does not have from the list;
 #   * the version in Cargo.toml is the tag without its `v`, is not the placeholder `0.0.0`, and is
 #     not on crates.io yet;
@@ -59,7 +60,7 @@ env:
   # The branch a release comes from, and the workflows (file names, space separated) that must be
   # green on the released commit. Each is a one-line change.
   MAIN_BRANCH: main
-  REQUIRED_WORKFLOWS: ci.yml miri-tb.yml miri-sb.yml macos.yml windows.yml
+  REQUIRED_WORKFLOWS: ci.yml miri-tb.yml miri-sb.yml macos.yml windows.yml loom.yml
   # The packages a release publishes, in this order: fairlane depends on the derive.
   PUBLISH_ORDER: fairlane-derive fairlane
 
