@@ -1,4 +1,12 @@
-#![doc = include_str!("../README.md")]
+// The README's examples use `#[derive(Lane)]`, so it is the crate's page with `derive` on, as on
+// docs.rs.
+#![cfg_attr(feature = "derive", doc = include_str!("../README.md"))]
+#![cfg_attr(
+  not(feature = "derive"),
+  doc = "A bounded multi-lane MPMC channel: a bound per lane, an anti-starvation policy, batched \
+         receives, and both awaited and blocking doors. Built with the `derive` feature, as on \
+         docs.rs, this page is the README, with its examples."
+)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
 #![deny(missing_docs)]
