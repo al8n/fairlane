@@ -10,6 +10,7 @@ name: CI
 #
 #   macos.yml, windows.yml    the `macos-latest` and `windows-latest` legs of clippy, build and test
 #   miri-tb.yml, miri-sb.yml  Miri under Tree Borrows and under Stacked Borrows
+#   loom.yml                  the loom models of the ring and the channel's waits
 #   perf.yml                  the criterion benches, run once as a smoke check
 #   coverage.yml              cargo-llvm-cov, uploaded to codecov; never a required check
 #

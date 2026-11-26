@@ -1,0 +1,84 @@
+name: loom
+
+# ── THE MODEL CHECKER ───────────────────────────────────────────────────────────────────────
+#
+# The loom models in `fairlane/src/models`: every interleaving of two or three threads over the
+# crate's atomics and cells, within a preemption bound of 3. They are what gates the ring's
+# `unsafe` and the channel's waits, beside Miri. A workflow of its own because `--cfg loom`
+# rebuilds the whole graph, and a model's state space sets its own clock, so it does not share a
+# verdict with the merge gate.
+#
+# `release.yml` requires it to be green on the commit it releases.
+#
+# `--release`, as loom asks: the models run far faster optimised. `-Dwarnings` is not set: lints
+# are `ci.yml`'s business, and this lane reports interleavings.
+
+# Triggers, `paths-ignore` and the concurrency group are `ci.yml`'s; its comments say why.
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'COPYRIGHT'
+      - 'LICENSE-*'
+      - '**.txt'
+  pull_request:
+    paths-ignore:
+      - 'COPYRIGHT'
+      - 'LICENSE-*'
+      - '**.txt'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || '' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUSTFLAGS: --cfg loom
+  LOOM_MAX_PREEMPTIONS: 3
+
+jobs:
+  # One job per group of models, each on its own runner, one model at a time
+  # (`--test-threads=1`): a model's state space is its own clock and its own memory, so a large
+  # one neither starves the others nor hides their verdicts. Run in one process, side by side,
+  # every model once ended with the runner losing contact after 2 h and no verdict printed.
+  loom:
+    name: loom (${{ matrix.group.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        group:
+          - { name: ring, filter: "models::ring::", skip: "" }
+          - { name: mp1, filter: "models::channel::mp1", skip: "" }
+          - { name: reserves, filter: "models::channel::mp", skip: "--skip models::channel::mp1" }
+          - { name: receivers, filter: "models::channel::ma", skip: "--skip models::channel::ma3" }
+          - { name: ma3, filter: "models::channel::ma3", skip: "" }
+          - { name: closes, filter: "models::channel::mc", skip: "" }
+          - { name: lanes, filter: "models::lanes::", skip: "" }
+    steps:
+      - uses: actions/checkout@v7
+      - name: Cache cargo build and registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-loom-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-loom-
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable
+      # `--lib`: the other unit tests compile under `--cfg loom` too, but they run outside a loom
+      # model, where loom's atomics refuse to be used; the filter keeps to the models.
+      - name: cargo test -p fairlane --features loom,test-util --release --lib (${{ matrix.group.name }})
+        run: >-
+          cargo test -p fairlane --features loom,test-util --release --lib ${{ matrix.group.filter }}
+          -- --nocapture --test-threads=1 ${{ matrix.group.skip }}
