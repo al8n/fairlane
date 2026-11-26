@@ -106,7 +106,7 @@ pub(crate) use faulty::Faults;
 mod faulty {
   use std::{
     sync::{
-      Arc,
+      Arc, Mutex,
       atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst},
     },
     task::{RawWaker, RawWakerVTable, Waker},
@@ -119,6 +119,9 @@ mod faulty {
     pub(crate) wake_panics: AtomicBool,
     pub(crate) drop_panics: AtomicBool,
     pub(crate) wakes: AtomicUsize,
+    /// Run once, by the next clone: user code that does what it likes inside a waker's `clone`.
+    #[allow(clippy::type_complexity)]
+    pub(crate) on_clone: Mutex<Option<Box<dyn FnOnce() + Send>>>,
   }
 
   impl Faults {
@@ -146,6 +149,11 @@ mod faulty {
   unsafe fn clone(data: *const ()) -> RawWaker {
     let faults = data.cast::<Faults>();
     // SAFETY: `data` is a live `Arc<Faults>` of this vtable, borrowed.
+    let hook = unsafe { (*faults).on_clone.lock().unwrap().take() };
+    if let Some(hook) = hook {
+      hook();
+    }
+    // SAFETY: as above.
     if unsafe { (*faults).clone_panics.load(SeqCst) } {
       panic!("a waker's clone panics");
     }

@@ -3,10 +3,9 @@ use core::{
   future::Future,
   num::NonZeroUsize,
   pin::Pin,
-  task::{Context, Poll},
+  task::{Context, Poll, Waker},
 };
 
-use event_listener::{EventListener, Listener};
 use hybrid_array::Array;
 
 use crate::{
@@ -19,6 +18,7 @@ use crate::{
   quota::Quota,
   snapshot::Snapshot,
   sync::{Arc, Mutex, Ordering, lock},
+  waiters::Key,
   wake::{Wakes, wake},
 };
 
@@ -285,13 +285,35 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   /// After a receive that took items: where items are left in a lane the quota admits, one more
   /// waiting receiver of that lane is woken. Every admitted lane is looked at, not only the one
   /// this receive woke on.
+  ///
+  /// Each lane's notification is made before its waker runs, and each waker runs under its own
+  /// catch, so a waker that panics leaves no other lane's receiver asleep.
   pub(crate) fn chain(&self, quota: &Quota<L>) {
+    let mut wakes = Wakes::new();
     for index in 0..lane_count::<L>() {
       let state = self.lane_at(index);
       let holds = state.ahead.load(Ordering::Relaxed) != 0 || !state.ring.is_empty();
       if quota.admits_at(index) && holds {
-        state.arrivals.wake_one();
+        wakes.wake(state.arrivals.wake_one());
       }
+    }
+    wakes.finish();
+  }
+}
+
+/// A receive that spent its notifications and then took nothing in full: dropped while armed, on
+/// an unwind out of the take, it runs the chain, so that the receivers it would have woken by
+/// taking are woken still.
+struct Repair<'a, T, L: Lane, Y: Policy<L>> {
+  shared: &'a Shared<T, L, Y>,
+  quota: &'a Quota<L>,
+  armed: bool,
+}
+
+impl<T, L: Lane, Y: Policy<L>> Drop for Repair<'_, T, L, Y> {
+  fn drop(&mut self) {
+    if self.armed {
+      self.shared.chain(self.quota);
     }
   }
 }
@@ -500,72 +522,65 @@ impl<T, L: Lane, Y: Policy<L>> fmt::Debug for Receiver<T, L, Y> {
   }
 }
 
-/// A receive's wait: a listener on each lane its quota admits, and its place in their counts.
+/// A receive's wait: its place in the line of each lane its quota admits.
 ///
-/// To sleep it listens on each lane, then counts itself on each, then looks again. On waking it
-/// leaves every count, discards every listener and starts over. Dropped while it waits, it leaves
-/// the counts and drops its listeners, so a notification it held goes to the next receiver.
+/// - **To sleep** it joins the line of each lane, then looks again. Each place goes into the
+///   future the moment it exists, so a waker clone that panics on a later lane leaves the earlier
+///   places to the future's drop.
+/// - **On waking** it leaves every line, spending its notifications, and takes. Where that take
+///   unwinds, a [`Repair`] runs the chain the take would have run.
+/// - **Dropped while it waits,** it leaves every line and passes on a notification it held. Each
+///   lane is left under its own lock, and every waker it lets go runs under its own catch, so a
+///   waker that panics leaves no place behind: a place left behind would hold its lane's one
+///   notification for ever.
 pub(crate) struct Arrival<L: Lane> {
-  /// One listener per lane it sleeps on; `None` where it does not, or where the listener is spent.
-  listeners: PerLane<Option<EventListener>, L>,
-  /// The lanes whose count holds it.
-  counted: PerLane<bool, L>,
+  /// Its place in each lane it sleeps on.
+  keys: PerLane<Option<Key>, L>,
   asleep: bool,
 }
 
 impl<L: Lane> Arrival<L> {
   fn new() -> Self {
     Self {
-      listeners: PerLane::from_array(Array::from_fn(|_| None)),
-      counted: PerLane::filled(false),
+      keys: PerLane::from_array(Array::from_fn(|_| None)),
       asleep: false,
     }
   }
 
-  /// Listens, then counts, on every lane `quota` admits.
-  fn sleep<T, Y: Policy<L>>(&mut self, shared: &Shared<T, L, Y>, quota: &Quota<L>) {
-    for index in 0..self.counted.as_slice().len() {
-      if quota.admits_at(index) {
-        self.listeners.as_mut_slice()[index] = Some(shared.lane_at(index).arrivals.listen());
-        self.counted.as_mut_slice()[index] = true;
-      }
-    }
+  /// Joins the line of every lane `quota` admits.
+  fn sleep<T, Y: Policy<L>>(&mut self, shared: &Shared<T, L, Y>, quota: &Quota<L>, waker: &Waker) {
     self.asleep = true;
-  }
-
-  /// Whether a listener has been notified. Each notified listener is spent.
-  fn poll_woken(&mut self, cx: &mut Context<'_>) -> bool {
-    let mut woken = false;
-    for listener in self.listeners.as_mut_slice() {
-      if let Some(waiting) = listener {
-        if Pin::new(waiting).poll(cx).is_ready() {
-          *listener = None;
-          woken = true;
-        }
+    for (index, key) in self.keys.as_mut_slice().iter_mut().enumerate() {
+      if quota.admits_at(index) {
+        let fresh = waker.clone();
+        *key = Some(shared.lane_at(index).arrivals.listen(fresh));
       }
     }
-    woken
   }
 
-  /// Leaves every count, and lets every listener go: discarded when the receive wakes or ends,
-  /// so that it causes no wake of its own; dropped when the receive is dropped, so that a
-  /// notification it held passes to the next listener. A notification discarded here is
-  /// repaired by the chain of the receive that took the items.
-  fn leave<T, Y: Policy<L>>(&mut self, shared: &Shared<T, L, Y>, discard: bool) {
+  /// Whether a lane's notification has come.
+  fn woken<T, Y: Policy<L>>(
+    &self,
+    shared: &Shared<T, L, Y>,
+    waker: &Waker,
+    wakes: &mut Wakes,
+  ) -> bool {
+    self.keys.as_slice().iter().enumerate().any(|(index, key)| {
+      key
+        .as_ref()
+        .is_some_and(|key| shared.lane_at(index).arrivals.woken(key, waker, wakes))
+    })
+  }
+
+  /// Leaves every line: spending the notifications it holds (`spend`), or passing them on.
+  fn leave<T, Y: Policy<L>>(&mut self, shared: &Shared<T, L, Y>, spend: bool, wakes: &mut Wakes) {
     if !self.asleep {
       return;
     }
     self.asleep = false;
-    for index in 0..self.counted.as_slice().len() {
-      if core::mem::take(&mut self.counted.as_mut_slice()[index]) {
-        shared.lane_at(index).arrivals.leave();
-      }
-      if let Some(listener) = self.listeners.as_mut_slice()[index].take() {
-        if discard {
-          listener.discard();
-        } else {
-          drop(listener);
-        }
+    for (index, key) in self.keys.as_mut_slice().iter_mut().enumerate() {
+      if let Some(key) = key.take() {
+        shared.lane_at(index).arrivals.leave(key, spend, wakes);
       }
     }
   }
@@ -581,28 +596,48 @@ impl<L: Lane> Arrival<L> {
     if !quota.admits_any() {
       return Poll::Ready(Err(RecvManyError::EmptyQuota));
     }
-    loop {
-      match shared.take(quota, sink) {
+    let mut wakes = Wakes::new();
+    let mut spent = false;
+    let polled = loop {
+      let mut repair = Repair {
+        shared,
+        quota,
+        armed: spent,
+      };
+      let took = shared.take(quota, sink);
+      repair.armed = false;
+      spent = false;
+      match took {
         Took::Items(held) => {
-          self.leave(shared, true);
+          self.leave(shared, true, &mut wakes);
           shared.chain(quota);
-          return Poll::Ready(Ok(held));
+          break Poll::Ready(Ok(held));
         }
         Took::Ended => {
-          self.leave(shared, true);
-          return Poll::Ready(Err(RecvManyError::Ended));
+          self.leave(shared, true, &mut wakes);
+          break Poll::Ready(Err(RecvManyError::Ended));
         }
         Took::Nothing => {}
       }
       if !self.asleep {
-        self.sleep(shared, quota);
+        self.sleep(shared, quota, cx.waker());
         continue;
       }
-      if !self.poll_woken(cx) {
-        return Poll::Pending;
+      if !self.woken(shared, cx.waker(), &mut wakes) {
+        break Poll::Pending;
       }
-      self.leave(shared, true);
-    }
+      self.leave(shared, true, &mut wakes);
+      spent = true;
+    };
+    wakes.finish();
+    polled
+  }
+
+  /// The receive is dropped: it leaves every line, passing on what it was notified of.
+  fn drop_wait<T, Y: Policy<L>>(&mut self, shared: &Shared<T, L, Y>) {
+    let mut wakes = Wakes::new();
+    self.leave(shared, false, &mut wakes);
+    wakes.finish();
   }
 }
 
@@ -635,7 +670,7 @@ impl<T, L: Lane, Y: Policy<L>> Future for RecvMany<'_, T, L, Y> {
 impl<T, L: Lane, Y: Policy<L>> Drop for RecvMany<'_, T, L, Y> {
   #[inline]
   fn drop(&mut self) {
-    self.wait.leave(self.shared, false);
+    self.wait.drop_wait(self.shared);
   }
 }
 
@@ -682,7 +717,7 @@ impl<T, L: Lane, Y: Policy<L>> Future for Recv<'_, T, L, Y> {
 impl<T, L: Lane, Y: Policy<L>> Drop for Recv<'_, T, L, Y> {
   #[inline]
   fn drop(&mut self) {
-    self.wait.leave(self.shared, false);
+    self.wait.drop_wait(self.shared);
   }
 }
 

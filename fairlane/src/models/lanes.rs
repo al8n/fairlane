@@ -1,9 +1,12 @@
 //! The waits and the choice of a channel of several lanes.
 
-use core::num::NonZeroUsize;
+use core::{future::Future, num::NonZeroUsize};
 
 use loom::{
-  sync::{Arc, atomic::Ordering::SeqCst},
+  sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering::SeqCst},
+  },
   thread,
 };
 
@@ -75,8 +78,8 @@ fn ma2_a_commit_wakes_a_receiver_that_admits_its_lane() {
   });
 }
 
-/// A receiver listening on lanes A and B, woken on both, takes one item and discards its other
-/// listener; the receiver of lane B alone is woken by the chain for the other item.
+/// A receiver in the lines of lanes A and B, notified on both, takes one item and spends its other
+/// notification; the receiver of lane B alone is woken by the chain for the other item.
 #[test]
 fn ma5_a_discarded_wake_is_repaired_by_the_chain() {
   model(|| {
@@ -103,6 +106,49 @@ fn ma5_a_discarded_wake_is_repaired_by_the_chain() {
     let (one, rx) = both.join().unwrap();
     let (other, only_b) = b.join().unwrap();
     assert_eq!(one + other, 2);
+    drop((sender.join().unwrap(), rx, only_b));
+  });
+}
+
+/// A receive in the line of every lane, dropped while it may hold a notification on lanes A and
+/// B: it passes each on, lane by lane, so the receiver of lane B alone takes B's item.
+#[test]
+fn ma7_a_dropped_receive_passes_on_each_lanes_notification() {
+  model(|| {
+    let (tx, rx) = lanes(false);
+    let only_b = rx.clone();
+    let listening = Arc::new(AtomicBool::new(false));
+    let dropper = {
+      let listening = listening.clone();
+      thread::spawn(move || {
+        let mut recv = rx.recv();
+        let polled = core::pin::Pin::new(&mut recv).poll(&mut core::task::Context::from_waker(
+          core::task::Waker::noop(),
+        ));
+        assert!(polled.is_pending());
+        listening.store(true, SeqCst);
+        drop(recv);
+        rx
+      })
+    };
+    let b = thread::spawn(move || {
+      let mut batch = Vec::new();
+      only_b
+        .recv_many_blocking(&mut batch, Quota::up_to(1).lanes(Three::B..=Three::B))
+        .unwrap();
+      (batch[0].lane(), only_b)
+    });
+    let sender = thread::spawn(move || {
+      while !listening.load(SeqCst) {
+        thread::yield_now();
+      }
+      tx.try_send(Three::A, 1).unwrap();
+      tx.try_send(Three::B, 2).unwrap();
+      tx
+    });
+    let rx = dropper.join().unwrap();
+    let (lane, only_b) = b.join().unwrap();
+    assert_eq!(lane, Three::B);
     drop((sender.join().unwrap(), rx, only_b));
   });
 }

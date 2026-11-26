@@ -2,11 +2,17 @@
 
 use core::{
   num::{NonZeroU32, NonZeroUsize},
-  sync::atomic::{AtomicUsize, Ordering},
+  panic::AssertUnwindSafe,
+  sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
+use std::panic::catch_unwind;
 
 use super::*;
-use crate::{LaneView, PassLimit, Policy, Quota, Received, Strict, lane::Lane, testing::Three};
+use crate::{
+  LaneView, PassLimit, Policy, Quota, Received, Strict,
+  lane::Lane,
+  testing::{Faults, Three},
+};
 
 /// Three lanes of `capacity`; lane A express where `express`.
 fn three(capacity: usize, express: bool) -> Options<Three> {
@@ -227,4 +233,93 @@ fn x3_o5_the_time_bounds_a_lanes_wait() {
   clock.advance(Duration::from_millis(11));
   while tx.try_send(Three::A, 7).is_ok() {}
   assert_eq!(rx.try_recv().unwrap().unwrap().lane(), Three::C, "overdue");
+}
+
+/// A receive asleep on every lane, dropped with a waker whose drop panics: it leaves every lane,
+/// so the next commit to any of them wakes the receive behind it.
+#[test]
+fn a_dropped_receive_leaves_every_lane_though_its_waker_panics() {
+  let (tx, rx) = channel_with::<u32, Three, _>(three(4, false), Strict).unwrap();
+  let faults = StdArc::new(Faults::default());
+  let faulty = faults.waker();
+  let mut first = rx.recv();
+  assert!(poll_with(&mut first, &faulty).is_pending());
+  let (probe, waker) = Probe::new();
+  let mut second = rx.recv();
+  assert!(poll_with(&mut second, &waker).is_pending());
+
+  faults.drop_panics.store(true, SeqCst);
+  let dropped = catch_unwind(AssertUnwindSafe(move || drop(first)));
+  faults.drop_panics.store(false, SeqCst);
+  assert!(dropped.is_err(), "the receive's stored wakers were dropped");
+  for lane in Three::ALL {
+    assert_eq!(
+      rx.snapshot().receivers_waiting(lane),
+      1,
+      "only the second receive waits on {lane:?}"
+    );
+  }
+  tx.try_send(Three::C, 7).unwrap();
+  assert!(
+    probe.take(),
+    "the commit woke the receive behind the dropped one"
+  );
+  assert!(matches!(poll_with(&mut second, &waker), Poll::Ready(Ok(_))));
+  drop(faulty);
+}
+
+/// Panics on `owed` while armed.
+struct PanicsWhileArmed(AtomicBool);
+
+impl Policy<Three> for PanicsWhileArmed {
+  type Stamp = ();
+
+  fn stamp(&self) {}
+
+  fn owed(&self, _: &LaneView<Three, ()>) -> Option<Three> {
+    if self.0.load(Ordering::SeqCst) {
+      panic!("a policy that panics");
+    }
+    None
+  }
+}
+
+/// A receive that is notified, spends its notifications, and then unwinds out of its take still
+/// wakes the receive behind it for the items it left.
+///
+/// The notifications land within one poll: the receive's take finds nothing, then it refreshes its
+/// waker, and the new waker's clone commits two items. The clone runs with no lock held.
+#[test]
+fn a_woken_receive_whose_take_unwinds_wakes_the_next() {
+  let policy = PanicsWhileArmed(AtomicBool::new(false));
+  let (tx, rx) = channel_with::<u32, Three, _>(three(4, false), policy).unwrap();
+  let (_, waker1) = Probe::new();
+  let (probe2, waker2) = Probe::new();
+  let mut first = rx.recv();
+  let mut second = rx.recv();
+  assert!(poll_with(&mut first, &waker1).is_pending());
+  assert!(poll_with(&mut second, &waker2).is_pending());
+
+  let faults = StdArc::new(Faults::default());
+  let sender = tx.clone();
+  *faults.on_clone.lock().unwrap() = Some(Box::new(move || {
+    sender.try_send(Three::B, 1).unwrap();
+    sender.try_send(Three::C, 2).unwrap();
+  }));
+  let faulty = faults.waker();
+  rx.policy().0.store(true, Ordering::SeqCst);
+  let unwound = catch_unwind(AssertUnwindSafe(|| poll_with(&mut first, &faulty)));
+  rx.policy().0.store(false, Ordering::SeqCst);
+  assert!(
+    unwound.is_err(),
+    "two lanes were in view, and the policy panicked"
+  );
+  assert!(
+    probe2.take(),
+    "the unwinding take woke the receive behind it"
+  );
+  assert!(matches!(
+    poll_with(&mut second, &waker2),
+    Poll::Ready(Ok(_))
+  ));
 }

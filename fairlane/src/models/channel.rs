@@ -249,10 +249,10 @@ fn ma1_a_dropped_notified_receiver_passes_the_wake_on() {
 /// Receiver A takes one of two items (a limit of 1) while receiver B is parked: B is woken for the
 /// other.
 ///
-/// One execution of it runs past loom's default of 1000 branches: three actors, two waits each,
-/// over event-listener's internals, whose `Arc`, `Mutex` and atomics are loom's, so each listen,
-/// register, notify and discard is several branches. Every wait loop in the crate yields or parks,
-/// so the bound is raised, not the model changed.
+/// One execution of it runs past loom's default of 1000 branches: three actors and two waits
+/// each, and each wait takes a lane's lock to join its line, is counted, looks again, and takes the
+/// lock again to leave. Every wait loop in the crate yields or parks, so the bound is raised, not
+/// the model changed.
 #[test]
 fn ma3_a_receive_that_leaves_items_wakes_the_next() {
   model_with_branches(20_000, || {
@@ -277,6 +277,30 @@ fn ma3_a_receive_that_leaves_items_wakes_the_next() {
     let (taken_b, other) = b.join().unwrap();
     assert_eq!(taken_a + taken_b, 2);
     drop((sender.join().unwrap(), rx, other));
+  });
+}
+
+/// A receive polled once with one waker, then driven with another, against a commit: the waker's
+/// refresh looks at the receive's state again once it holds the new waker's clone, so a
+/// notification that landed while the lock was let go is not missed, and the item is received.
+#[test]
+fn ma6_a_refreshed_receive_takes_the_commit() {
+  model(|| {
+    let (tx, rx) = channel(1);
+    let receiver = thread::spawn(move || {
+      let mut recv = rx.recv();
+      let received = match poll_once(&mut recv) {
+        Poll::Ready(received) => received,
+        Poll::Pending => block_on(recv),
+      };
+      received.unwrap().into_item()
+    });
+    let sender = thread::spawn(move || {
+      tx.try_send(Single, 3).unwrap();
+      tx
+    });
+    assert_eq!(receiver.join().unwrap(), 3);
+    drop(sender.join().unwrap());
   });
 }
 

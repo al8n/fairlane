@@ -220,7 +220,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     let state = self.lane_at(index);
     match state.ring.push(item, || self.policy.stamp()) {
       Ok(_) => {
-        state.arrivals.wake_one();
+        wake(state.arrivals.wake_one());
         Ok(())
       }
       Err(item) => {
@@ -235,8 +235,8 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   /// nothing commits anywhere once any `close` has returned. True for the one call that came
   /// first.
   ///
-  /// The reserves it closes are woken once every lane is marked: a waker is user code, and one
-  /// that panics leaves no lane open.
+  /// The reserves and the receivers it closes are woken once every lane is marked: a waker is
+  /// user code, and one that panics leaves no lane open.
   pub(crate) fn close(&self) -> bool {
     let first = !self.closing.swap(true, Ordering::SeqCst);
     let mut wakers = Vec::new();
@@ -245,7 +245,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
       state.ring.close();
     }
     for state in self.lanes.as_slice() {
-      state.arrivals.wake_all();
+      state.arrivals.close(&mut wakers);
     }
     self.closed.notify(usize::MAX);
     wake_all(wakers);
