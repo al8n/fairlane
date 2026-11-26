@@ -92,21 +92,33 @@ pub(crate) struct Ring<T, S> {
 unsafe impl<T: Send, S: Send> Sync for Ring<T, S> {}
 
 impl<T, S: Copy> Ring<T, S> {
-  /// A ring that holds `capacity` items, with a stamp beside each where `stamped`. `None` where
-  /// `capacity`'s power of two overflows, or its cells cannot be laid out.
-  pub(crate) fn new(capacity: usize, stamped: bool) -> Option<Self> {
+  /// Whether a ring of `capacity` items, with stamps where `stamped`, can be laid out: its power
+  /// of two, its positions, and the layouts of its cells and its stamps. Allocates nothing.
+  pub(crate) fn fits(capacity: usize, stamped: bool) -> bool {
+    Self::cells(capacity, stamped).is_some()
+  }
+
+  /// The number of cells of a ring of `capacity` items, where it can be laid out.
+  fn cells(capacity: usize, stamped: bool) -> Option<usize> {
     let len = capacity.max(MIN_CELLS).checked_next_power_of_two()?;
-    let mask = u64::try_from(len).ok()?.checked_sub(1)?;
-    if mask >= MARK {
+    if u64::try_from(len).ok()? > MARK {
       return None;
     }
-    // Both layouts first, so that one past `isize::MAX` is refused before anything is allocated.
-    // `try_reserve_exact` then refuses an allocation the system cannot give, so neither case
-    // panics or aborts.
     Layout::array::<Cell<T>>(len).ok()?;
     if stamped {
       Layout::array::<UnsafeCell<MaybeUninit<S>>>(len).ok()?;
     }
+    Some(len)
+  }
+
+  /// A ring that holds `capacity` items, with a stamp beside each where `stamped`. `None` where it
+  /// cannot be laid out ([`fits`](Self::fits)), or where the system refuses its memory.
+  pub(crate) fn new(capacity: usize, stamped: bool) -> Option<Self> {
+    // Both layouts first, so that one past `isize::MAX` is refused before anything is allocated.
+    // `try_reserve_exact` then refuses an allocation the system cannot give, so neither case
+    // panics or aborts.
+    let len = Self::cells(capacity, stamped)?;
+    let mask = len as u64 - 1;
     let mut cells = Vec::new();
     cells.try_reserve_exact(len).ok()?;
     cells.extend((0..=mask).map(|position| Cell {

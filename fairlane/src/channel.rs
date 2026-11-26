@@ -153,7 +153,9 @@ impl<T, S> Drop for Refund<'_, T, S> {
 }
 
 pub(crate) struct Shared<T, L: Lane, Y: Policy<L>> {
-  lanes: PerLane<LaneState<T, Y::Stamp>, L>,
+  /// One state per lane, by index, on the heap: a channel of many lanes is built without an array
+  /// of lane states on the stack.
+  lanes: Box<[LaneState<T, Y::Stamp>]>,
   /// Each index's lane, read once at the construction: the receiving side never calls back into
   /// `Lane` to name an item's lane.
   names: PerLane<L, L>,
@@ -176,26 +178,35 @@ pub(crate) struct Shared<T, L: Lane, Y: Policy<L>> {
 impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   fn new(options: &Options<L>, policy: Y) -> Result<Self, Malformed> {
     options.check()?;
-    let lanes = lane_count::<L>() >= 2;
+    let count = lane_count::<L>();
+    let lanes = count >= 2;
     let express = PerLane::from_array(Array::from_fn(|index| options.is_express_at(index)));
-    let states = Array::try_from_fn(|index| {
-      let capacity = options.lane_at(index).capacity().get();
-      // A stamp matters only to the policy, which never sees an express lane, nor the one lane
-      // of a channel of one.
-      let stamped = lanes && !*express.at(index);
-      Ok(LaneState {
-        ring: Ring::new(capacity, stamped).ok_or(Malformed::Capacity(index))?,
-        remaining: Remaining::new(capacity),
+    // A stamp matters only to the policy, which never sees an express lane, nor the one lane of a
+    // channel of one.
+    let stamped = |index: usize| lanes && !*express.at(index);
+    let capacity = |index: usize| options.lane_at(index).capacity().get();
+    // Every ring's layout is checked before the first ring is allocated, so a lane that cannot be
+    // held is refused with nothing built.
+    if let Some(index) =
+      (0..count).find(|&index| !Ring::<T, Y::Stamp>::fits(capacity(index), stamped(index)))
+    {
+      return Err(Malformed::Capacity(index));
+    }
+    let mut states = Vec::with_capacity(count);
+    for index in 0..count {
+      states.push(LaneState {
+        ring: Ring::new(capacity(index), stamped(index)).ok_or(Malformed::Capacity(index))?,
+        remaining: Remaining::new(capacity(index)),
         reserves: Reserves::new(),
         arrivals: Arrivals::new(),
-        capacity,
-        lookahead: stamped && size_of::<Y::Stamp>() != 0,
+        capacity: capacity(index),
+        lookahead: stamped(index) && size_of::<Y::Stamp>() != 0,
         ahead: AtomicUsize::new(0),
         taken: AtomicU64::new(0),
-      })
-    })?;
+      });
+    }
     Ok(Self {
-      lanes: PerLane::from_array(states),
+      lanes: states.into_boxed_slice(),
       names: PerLane::from_fn(|lane| lane),
       express,
       choice: lanes.then(|| Mutex::new(Choice::new())),
@@ -218,7 +229,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
 
   #[inline]
   pub(crate) fn lane_at(&self, index: usize) -> &LaneState<T, Y::Stamp> {
-    self.lanes.at(index)
+    &self.lanes[index]
   }
 
   /// The channel's address: the name the re-entry marker knows it by.
@@ -309,11 +320,11 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   /// wakers go onto `wakers`.
   fn shut(&self, wakers: &mut Vec<Waker>) -> bool {
     let first = !self.closing.swap(true, Ordering::SeqCst);
-    for state in self.lanes.as_slice() {
+    for state in self.lanes.iter() {
       state.reserves.close(&state.remaining, wakers);
       state.ring.close();
     }
-    for state in self.lanes.as_slice() {
+    for state in self.lanes.iter() {
       state.arrivals.close(wakers);
     }
     // `Release`, after every mark: a thread that reads the flag set (`Acquire`) sees every lane
@@ -391,7 +402,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
 
   pub(crate) fn snapshot(&self) -> Snapshot<L> {
     let readings = Array::from_fn(|index| {
-      let state = self.lanes.at(index);
+      let state = &self.lanes[index];
       // One reading each. An item the choice lock holds ahead is popped and not taken, so a lane
       // with a lookahead counts its takes apart: its head moves at the pop, and `head - ahead`
       // would rise and fall again across one move into the lookahead.
@@ -455,7 +466,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
       let mut choice = lock(choice);
       for (index, slot) in choice.ahead.iter_mut().enumerate() {
         if let Some(popped) = slot.take() {
-          let state = self.lanes.at(index);
+          let state = &self.lanes[index];
           state.ahead.store(0, Ordering::Relaxed);
           state.taken.store(popped.ordinal + 1, Ordering::Relaxed);
           ahead.push((index, popped.item));
@@ -465,10 +476,10 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     // Each item is dropped after the choice lock is let go, under its own catch. The close has
     // emptied every line, so a room given back here grants no reserve.
     for (index, item) in ahead {
-      wakers.extend(self.lanes.at(index).release());
+      wakers.extend(self.lanes[index].release());
       let _ = std::panic::catch_unwind(AssertUnwindSafe(move || drop(item)));
     }
-    for state in self.lanes.as_slice() {
+    for state in self.lanes.iter() {
       while let Some(popped) = state.ring.pop() {
         if state.lookahead {
           state.taken.store(popped.ordinal + 1, Ordering::Relaxed);

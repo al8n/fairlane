@@ -268,8 +268,8 @@ fn a_capacity_that_cannot_be_held_is_refused() {
   );
 }
 
-/// The shared state holds no item inline, whatever the lane count: a channel of large items is
-/// built without moving them through the stack.
+/// The shared state holds no item and no lane state inline, whatever the lane count: a channel of
+/// large items, or of many lanes, is built without moving them through the stack.
 #[test]
 fn shared_state_holds_no_item_inline() {
   type Large = [u8; 1 << 16];
@@ -277,6 +277,10 @@ fn shared_state_holds_no_item_inline() {
   assert!(
     size_of::<Shared<Large, crate::testing::Three, DefaultPolicy<crate::testing::Three>>>()
       < size_of::<Large>()
+  );
+  assert!(
+    size_of::<Shared<u8, crate::testing::Three, crate::Strict>>() < size_of::<LaneState<u8, ()>>(),
+    "three lanes' states would not fit in less than one"
   );
 }
 
