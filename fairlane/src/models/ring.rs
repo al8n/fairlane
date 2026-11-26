@@ -19,7 +19,7 @@ fn mk1_two_pushers_one_popper() {
       .into_iter()
       .map(|item| {
         let ring = ring.clone();
-        thread::spawn(move || (item, ring.push(item, ()).unwrap()))
+        thread::spawn(move || (item, ring.push(item, || ()).unwrap()))
       })
       .collect();
     let popper = {
@@ -55,7 +55,7 @@ fn mk2_a_pop_waits_for_a_claimed_cell() {
     let ring = Arc::new(Ring::<u32, ()>::new(1, false).unwrap());
     let pusher = {
       let ring = ring.clone();
-      thread::spawn(move || ring.push(7, ()).unwrap())
+      thread::spawn(move || ring.push(7, || ()).unwrap())
     };
     let popper = {
       let ring = ring.clone();
@@ -82,8 +82,8 @@ fn mk2_a_pop_waits_for_a_claimed_cell() {
 fn mk3_a_push_of_the_next_lap_waits_for_a_slow_popper() {
   model(|| {
     let ring = Arc::new(Ring::<u32, ()>::new(2, false).unwrap());
-    ring.push(1, ()).unwrap();
-    ring.push(2, ()).unwrap();
+    ring.push(1, || ()).unwrap();
+    ring.push(2, || ()).unwrap();
     let room = Arc::new(AtomicUsize::new(0));
     let poppers: Vec<_> = (0..2)
       .map(|_| {
@@ -109,7 +109,7 @@ fn mk3_a_push_of_the_next_lap_waits_for_a_slow_popper() {
           }
           thread::yield_now();
         }
-        ring.push(3, ()).unwrap()
+        ring.push(3, || ()).unwrap()
       })
     };
     let mut items: Vec<u32> = poppers.into_iter().map(|h| h.join().unwrap()).collect();

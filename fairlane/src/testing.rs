@@ -61,3 +61,39 @@ impl Rng {
     self.below(n) == 0
   }
 }
+
+/// A waker that counts its wakes: a test polls a future only once its waker was woken, as an
+/// executor would.
+pub(crate) struct Probe(std::sync::atomic::AtomicUsize);
+
+impl std::task::Wake for Probe {
+  fn wake(self: std::sync::Arc<Self>) {
+    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+  }
+
+  fn wake_by_ref(self: &std::sync::Arc<Self>) {
+    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+  }
+}
+
+impl Probe {
+  /// A fresh probe and its waker.
+  pub(crate) fn new() -> (std::sync::Arc<Self>, std::task::Waker) {
+    let probe = std::sync::Arc::new(Self(std::sync::atomic::AtomicUsize::new(0)));
+    let waker = std::task::Waker::from(probe.clone());
+    (probe, waker)
+  }
+
+  /// Whether the waker was woken since the last call.
+  pub(crate) fn take(&self) -> bool {
+    self.0.swap(0, std::sync::atomic::Ordering::SeqCst) > 0
+  }
+}
+
+/// Polls `future` once with `waker`.
+pub(crate) fn poll_with<F: core::future::Future + Unpin>(
+  future: &mut F,
+  waker: &std::task::Waker,
+) -> core::task::Poll<F::Output> {
+  core::pin::Pin::new(future).poll(&mut core::task::Context::from_waker(waker))
+}

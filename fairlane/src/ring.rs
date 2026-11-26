@@ -50,6 +50,7 @@ pub(crate) struct Popped<T, S> {
   pub(crate) ordinal: u64,
   pub(crate) item: T,
   /// `None` for a ring made without stamps.
+  #[cfg_attr(not(test), allow(dead_code))]
   pub(crate) stamp: Option<S>,
 }
 
@@ -110,9 +111,12 @@ impl<T, S: Copy> Ring<T, S> {
   /// Commits `item` at the next position, and answers the position: its ordinal. Where the ring is
   /// closed, nothing is committed and the item comes back.
   ///
+  /// A stamped ring calls `stamp` once, just before the commit; an unstamped ring never calls it.
+  ///
   /// The caller holds room for the item. Without it the push would still be sound, and would wait
   /// for a pop to free its cell.
-  pub(crate) fn push(&self, item: T, stamp: S) -> Result<u64, T> {
+  pub(crate) fn push(&self, item: T, stamp: impl FnOnce() -> S) -> Result<u64, T> {
+    let stamp = self.stamps.is_some().then(stamp);
     let mut tail = self.tail.load(Ordering::Relaxed);
     let position = loop {
       if tail & MARK != 0 {
@@ -144,7 +148,7 @@ impl<T, S: Copy> Ring<T, S> {
       // cell's value now, and writing a whole `MaybeUninit` over it is sound.
       unsafe { value.write(MaybeUninit::new(item)) }
     });
-    if let Some(stamps) = &self.stamps {
+    if let (Some(stamps), Some(stamp)) = (&self.stamps, stamp) {
       stamps[index].with_mut(|slot| {
         // SAFETY: the same window as the item's: this thread owns `position`, and the stamp beside
         // the cell is reached only by the owner of the cell's position.
@@ -256,13 +260,6 @@ impl<T, S: Copy> Ring<T, S> {
   #[inline]
   pub(crate) fn received(&self) -> u64 {
     self.head.load(Ordering::Relaxed)
-  }
-
-  /// Committed and not yet claimed by a pop. A reading for the snapshot: no decision rests on it.
-  #[inline]
-  pub(crate) fn queued(&self) -> u64 {
-    let head = self.head.load(Ordering::Relaxed);
-    (self.tail.load(Ordering::SeqCst) & !MARK).saturating_sub(head)
   }
 }
 

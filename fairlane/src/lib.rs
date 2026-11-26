@@ -3,7 +3,6 @@
 #![cfg_attr(docsrs, allow(unused_attributes))]
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
-#![cfg_attr(not(test), allow(dead_code))]
 
 #[cfg(all(loom, not(feature = "loom")))]
 compile_error!("`--cfg loom` builds fairlane on loom, which needs fairlane's `loom` feature");
@@ -13,6 +12,7 @@ compile_error!(
   "fairlane needs 64-bit atomics: a ring position, which is an item's ordinal, is an `AtomicU64`"
 );
 
+pub use channel::bounded;
 #[cfg(feature = "test-util")]
 #[cfg_attr(docsrs, doc(cfg(feature = "test-util")))]
 pub use clock::ManualClock;
@@ -20,11 +20,15 @@ pub use clock::{Clock, Moment, Monotonic};
 pub use error::{Closed, Ended, SendError, TryReserveError, TrySendError};
 pub use lane::{Lane, PerLane, Single};
 pub use options::{LaneOptions, Malformed, Options};
+pub use permit::{OwnedPermit, Permit};
 pub use policy::{
   DEFAULT_MAX_WAIT, DEFAULT_PASS_LIMIT, DefaultPolicy, Elapsed, FirstOf, LaneView, PassLimit,
   Policy, Stamps, Strict,
 };
 pub use quota::Quota;
+pub use receiver::{Received, Receiver, Recv, RecvMany, RecvManyError};
+pub use sender::{Reserve, ReserveOwned, Sender, Sending, WhenClosed};
+pub use snapshot::Snapshot;
 
 /// `#[derive(Lane)]` for a fieldless enum: the lanes in declaration order, index 0 first.
 ///
@@ -61,14 +65,23 @@ pub use fairlane_derive::Lane;
 
 pub mod choice;
 
+mod arrivals;
+mod channel;
 mod clock;
 mod error;
 mod lane;
 mod options;
+mod park;
+mod permit;
 mod policy;
 mod quota;
+mod receiver;
+mod remaining;
+mod reserves;
 #[allow(unsafe_code)]
 mod ring;
+mod sender;
+mod snapshot;
 mod sync;
 
 #[cfg(test)]

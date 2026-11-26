@@ -152,6 +152,12 @@ impl<T, L: Lane> PerLane<T, L> {
   pub(crate) fn at(&self, index: usize) -> &T {
     &self.values[index]
   }
+
+  /// The values by index, mutably.
+  #[inline]
+  pub(crate) fn as_mut_slice(&mut self) -> &mut [T] {
+    self.values.as_mut_slice()
+  }
 }
 
 /// How many lanes `L` has.

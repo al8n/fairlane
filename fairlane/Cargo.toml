@@ -25,11 +25,13 @@ either = ["dep:either"]
 test-util = []
 # Builds the crate's atomics and cells on loom, for the models in `src/models`. It takes effect
 # only under `--cfg loom`.
-loom = ["dep:loom"]
+# event-listener's own `loom` feature is required under `--cfg loom`: its code switches on the cfg.
+loom = ["dep:loom", "event-listener/loom"]
 
 [dependencies]
 fairlane-derive = { workspace = true, optional = true }
 crossbeam-utils = "0.8"
+event-listener = "5"
 hybrid-array = "0.4"
 # `const-generics` gives `typenum::U<N>`, which the derive's output names.
 typenum = { version = "1", features = ["const-generics"] }
@@ -38,7 +40,7 @@ either = { version = "1", optional = true, default-features = false }
 serde_core = { version = "1", optional = true, default-features = false }
 
 [target.'cfg(loom)'.dependencies]
-loom = { version = "0.7", optional = true }
+loom = { version = "0.7", optional = true, features = ["futures"] }
 
 [dev-dependencies]
 serde_json = "1"

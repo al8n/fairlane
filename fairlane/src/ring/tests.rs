@@ -21,9 +21,9 @@ impl Drop for Counted {
 fn ring_is_fifo_and_its_ordinals_are_positions() {
   let ring = Ring::<u32, ()>::new(4, false).unwrap();
   for item in 0..4 {
-    assert_eq!(ring.push(item, ()), Ok(u64::from(item)));
+    assert_eq!(ring.push(item, || ()), Ok(u64::from(item)));
   }
-  assert_eq!(ring.queued(), 4);
+  assert_eq!(ring.committed() - ring.received(), 4);
   for item in 0..4 {
     let popped = ring.pop().unwrap();
     assert_eq!((popped.ordinal, popped.item), (u64::from(item), item));
@@ -31,10 +31,7 @@ fn ring_is_fifo_and_its_ordinals_are_positions() {
   }
   assert!(ring.pop().is_none());
   assert!(ring.is_empty());
-  assert_eq!(
-    (ring.committed(), ring.received(), ring.queued()),
-    (4, 4, 0)
-  );
+  assert_eq!((ring.committed(), ring.received()), (4, 4));
 }
 
 #[test]
@@ -44,7 +41,7 @@ fn ring_laps_over_a_buffer_larger_than_its_capacity() {
   let mut next = 0;
   for _ in 0..50 {
     for _ in 0..3 {
-      assert_eq!(ring.push(next, ()), Ok(next));
+      assert_eq!(ring.push(next, || ()), Ok(next));
       next += 1;
     }
     for expected in next - 3..next {
@@ -60,7 +57,7 @@ fn ring_of_one() {
   let ring = Ring::<&str, ()>::new(1, false).unwrap();
   assert_eq!(ring.mask, 0);
   for round in 0..5_u64 {
-    assert_eq!(ring.push("x", ()), Ok(round));
+    assert_eq!(ring.push("x", || ()), Ok(round));
     assert_eq!(ring.pop().unwrap().item, "x");
   }
 }
@@ -68,12 +65,12 @@ fn ring_of_one() {
 #[test]
 fn ring_close_hands_a_later_push_its_item() {
   let ring = Ring::<String, ()>::new(2, false).unwrap();
-  ring.push("kept".to_owned(), ()).unwrap();
+  ring.push("kept".to_owned(), || ()).unwrap();
   assert!(!ring.is_closed());
   assert!(ring.close());
   assert!(!ring.close());
   assert!(ring.is_closed());
-  assert_eq!(ring.push("late".to_owned(), ()), Err("late".to_owned()));
+  assert_eq!(ring.push("late".to_owned(), || ()), Err("late".to_owned()));
   assert!(!ring.is_ended());
   assert_eq!(ring.pop().unwrap().item, "kept");
   assert!(ring.is_ended());
@@ -94,7 +91,7 @@ fn ring_drops_what_is_left_once() {
   let drops = Arc::new(AtomicUsize::new(0));
   let ring = Ring::<Counted, ()>::new(4, false).unwrap();
   for _ in 0..3 {
-    assert!(ring.push(Counted(drops.clone()), ()).is_ok());
+    assert!(ring.push(Counted(drops.clone()), || ()).is_ok());
   }
   drop(ring.pop().unwrap());
   assert_eq!(drops.load(SeqCst), 1);
@@ -107,20 +104,20 @@ fn ring_drops_heap_items_left_across_a_lap() {
   let ring = Ring::<Box<u64>, ()>::new(2, false).unwrap();
   for item in 0..5 {
     // Room first, as a permit would hold it: a full ring is popped before the next push.
-    if ring.queued() == 2 {
+    if ring.committed() - ring.received() == 2 {
       ring.pop().unwrap();
     }
-    ring.push(Box::new(item), ()).unwrap();
+    ring.push(Box::new(item), || ()).unwrap();
   }
-  assert_eq!(ring.queued(), 2);
+  assert_eq!(ring.committed() - ring.received(), 2);
   drop(ring);
 }
 
 #[test]
 fn ring_carries_stamps() {
   let ring = Ring::<u8, (u64, u32)>::new(2, true).unwrap();
-  ring.push(1, (10, 20)).unwrap();
-  ring.push(2, (30, 40)).unwrap();
+  ring.push(1, || (10, 20)).unwrap();
+  ring.push(2, || (30, 40)).unwrap();
   assert_eq!(ring.pop().unwrap().stamp, Some((10, 20)));
   assert_eq!(ring.pop().unwrap().stamp, Some((30, 40)));
 }
@@ -129,7 +126,7 @@ fn ring_carries_stamps() {
 fn ring_holds_zero_sized_items() {
   let ring = Ring::<(), ()>::new(2, true).unwrap();
   for round in 0..10_u64 {
-    assert_eq!(ring.push((), ()), Ok(round));
+    assert_eq!(ring.push((), || ()), Ok(round));
     assert_eq!(ring.pop().unwrap().ordinal, round);
   }
 }
@@ -176,7 +173,7 @@ fn ring_moves_items_between_threads() {
             }
             thread::yield_now();
           }
-          ring.push((pusher, sequence), ()).unwrap();
+          ring.push((pusher, sequence), || ()).unwrap();
         }
       })
     })
@@ -232,7 +229,7 @@ fn ring_answers_empty_only_where_head_meets_tail() {
   for round in 0..40 {
     let pushes = round % 4;
     for _ in 0..pushes {
-      ring.push(next, ()).unwrap();
+      ring.push(next, || ()).unwrap();
       next += 1;
     }
     for _ in 0..=pushes {
@@ -241,4 +238,23 @@ fn ring_answers_empty_only_where_head_meets_tail() {
       assert_eq!(ring.pop().is_none(), meets);
     }
   }
+}
+
+#[test]
+fn ring_takes_a_stamp_only_where_it_keeps_one() {
+  let unstamped = Ring::<u8, u64>::new(2, false).unwrap();
+  unstamped
+    .push(1, || unreachable!("an unstamped ring never takes a stamp"))
+    .unwrap();
+  assert_eq!(unstamped.pop().unwrap().stamp, None);
+  let stamped = Ring::<u8, u64>::new(2, true).unwrap();
+  let mut taken = 0;
+  stamped
+    .push(1, || {
+      taken += 1;
+      9
+    })
+    .unwrap();
+  assert_eq!(taken, 1);
+  assert_eq!(stamped.pop().unwrap().stamp, Some(9));
 }
