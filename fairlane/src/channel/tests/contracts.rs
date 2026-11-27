@@ -221,6 +221,7 @@ enum Call {
   Nothing,
   Receive,
   WaitForRoom,
+  PollQueued,
 }
 
 /// A policy that calls back into its own channel from `owed`, through handles it is given.
@@ -228,6 +229,8 @@ struct Reentrant {
   call: std::sync::Mutex<Call>,
   rx: std::sync::Mutex<Option<Receiver<u32, Three, Reentrant>>>,
   tx: std::sync::Mutex<Option<Sender<u32, Three, Reentrant>>>,
+  /// A reserve already in a line, for `PollQueued`.
+  queued: std::sync::Mutex<Option<crate::ReserveOwned<u32, Three, Reentrant>>>,
 }
 
 impl Policy<Three> for Reentrant {
@@ -247,6 +250,11 @@ impl Policy<Three> for Reentrant {
         let tx = self.tx.lock().unwrap().clone().unwrap();
         let _ = tx.send_blocking(Three::C, 9);
       }
+      Call::PollQueued => {
+        let mut reserve = self.queued.lock().unwrap().take().unwrap();
+        let _ = poll_with(&mut reserve, core::task::Waker::noop());
+        *self.queued.lock().unwrap() = Some(reserve);
+      }
     }
     None
   }
@@ -265,6 +273,7 @@ fn reentrant(
     call: std::sync::Mutex::new(Call::Nothing),
     rx: std::sync::Mutex::new(None),
     tx: std::sync::Mutex::new(None),
+    queued: std::sync::Mutex::new(None),
   };
   let (tx, rx) = channel_with(options, policy).unwrap();
   *rx.policy().rx.lock().unwrap() = Some(rx.clone());
@@ -279,6 +288,7 @@ fn reentrant(
 fn release(tx: &Sender<u32, Three, Reentrant>) {
   tx.policy().rx.lock().unwrap().take();
   tx.policy().tx.lock().unwrap().take();
+  tx.policy().queued.lock().unwrap().take();
 }
 
 fn message(payload: Box<dyn core::any::Any + Send>) -> String {
@@ -323,6 +333,26 @@ fn a_policy_that_waits_for_room_in_its_channel_is_refused() {
     ),
     (1, 0, 0)
   );
+  assert_eq!(rx.try_recv().unwrap().unwrap().lane(), Three::B);
+  release(&tx);
+}
+
+/// A policy that polls, inside a choice, a reserve already in its own channel's line is refused by
+/// name before the reserve waits again, as a reserve that would join the line is.
+#[test]
+fn a_policy_that_drives_a_queued_reserve_is_refused() {
+  let (tx, rx) = reentrant(Call::Nothing);
+  let mut queued = tx.reserve_owned(Three::C);
+  assert!(
+    poll_with(&mut queued, core::task::Waker::noop()).is_pending(),
+    "lane C is full"
+  );
+  *tx.policy().queued.lock().unwrap() = Some(queued);
+  *tx.policy().call.lock().unwrap() = Call::PollQueued;
+  let refused = catch_unwind(AssertUnwindSafe(|| rx.try_recv())).unwrap_err();
+  assert!(message(refused).contains("waited for room on the channel it serves"));
+  *tx.policy().call.lock().unwrap() = Call::Nothing;
+  assert_eq!(tx.snapshot().queued(Three::C), 1);
   assert_eq!(rx.try_recv().unwrap().unwrap().lane(), Three::B);
   release(&tx);
 }

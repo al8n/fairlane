@@ -79,7 +79,7 @@ impl Reserves {
           self.begin(remaining, wait, waker.clone(), spare)
         }
       },
-      Wait::Waiting(_) => self.again(wait, waker, spare),
+      Wait::Waiting(_) => self.again(wait, waker, spare, channel),
       // Polled after it resolved: the future's contract leaves this open, and it never wakes.
       Wait::Done => Poll::Pending,
     }
@@ -124,8 +124,18 @@ impl Reserves {
 
   /// A reserve in the line, polled again: its verdict, read from its own state, or its waker kept
   /// up to date.
-  fn again(&self, wait: &mut Wait, waker: &Waker, spare: &mut Spare) -> Poll<Result<(), Closed>> {
+  ///
+  /// A verdict is collected at once. A reserve still in line, polled inside its own channel's
+  /// choice, is refused by name before it waits again, as one that joins the line is.
+  fn again(
+    &self,
+    wait: &mut Wait,
+    waker: &Waker,
+    spare: &mut Spare,
+    channel: usize,
+  ) -> Poll<Result<(), Closed>> {
     let mut fresh: Option<Waker> = None;
+    let mut checked = false;
     loop {
       {
         let mut line = lock(&self.line);
@@ -133,6 +143,13 @@ impl Reserves {
           return Poll::Pending;
         };
         match line.state(key) {
+          State::Queued if !checked => {
+            // Checked with the lock let go: a panic there leaves the line as it is.
+            drop(line);
+            reentry::refuse(channel, "waited for room");
+            checked = true;
+            continue;
+          }
           State::Queued => {
             if line.will_wake(key, waker) {
               spare.keep(fresh);
