@@ -3,9 +3,10 @@
 //! - **A receive going to sleep** joins the line of every lane its quota admits, and is counted on
 //!   each, under each lane's lock. Then it looks again, in full.
 //! - **A commit** moves the tail, then reads the count. Only where it is not zero does it take the
-//!   lock and notify the oldest receiver in line, unless one is notified already and not yet awake:
-//!   that one counts as the one, so a burst of commits wakes no herd. The count keeps a commit that
-//!   nobody waits for off the lock.
+//!   lock and notify the oldest receiver in line: one notice per commit, whatever notices are
+//!   outstanding, so a notified receiver whose task is busy elsewhere holds back no other receiver.
+//!   A burst of commits wakes at most one receiver per item. The count keeps a commit that nobody
+//!   waits for off the lock.
 //! - **No wakeup is lost.** The count's changes and the tail's moves are `SeqCst` read-modify-writes,
 //!   and both reads are `SeqCst` loads. In the single total order `S`, if the receive's look at the
 //!   tail comes before the commit's compare-and-swap, the commit's count load comes after the
@@ -13,9 +14,9 @@
 //!   in line. That increment happens-before the load, so the commit's lock comes after the
 //!   receive's critical section and finds the receive in line, or the receive already left it,
 //!   awake. Otherwise the receive's look comes after the compare-and-swap, and sees the item.
-//! - **A notified receiver that is dropped** passes its notification to the next receiver in line.
-//!   One that woke and goes on to take spends it: the receive that takes the items wakes the next
-//!   receiver where items are left (the chain).
+//! - **A notified receiver that is dropped** passes its notification to the next receiver in line,
+//!   whatever other notices are outstanding. One that woke and goes on to take spends it: the
+//!   receive that takes the items wakes the next receiver where items are left (the chain).
 
 use core::task::Waker;
 
@@ -96,8 +97,8 @@ impl Arrivals {
   }
 
   /// Leaves the line. Where the receiver had been notified and is being dropped (`spend` false),
-  /// the notification goes to the next receiver in line; where it woke and goes on to take
-  /// (`spend` true), it is spent.
+  /// the notification goes to the next receiver in line, whatever other notices are outstanding;
+  /// where it woke and goes on to take (`spend` true), it is spent.
   ///
   /// Answers the waker the receiver held, to be dropped, and the waker of the receiver its
   /// notification went to, to be woken: by the caller, once the receive has left every line.
@@ -106,7 +107,7 @@ impl Arrivals {
     let mut line = lock(&self.line);
     let (state, stored) = line.remove(key);
     self.count.fetch_sub(1, Ordering::SeqCst);
-    let passed = if state == State::Notified && !spend && line.notified() == 0 {
+    let passed = if state == State::Notified && !spend {
       line.notify_oldest().flatten()
     } else {
       None
@@ -114,20 +115,15 @@ impl Arrivals {
     (stored, passed)
   }
 
-  /// Notifies one waiting receiver, where any waits and none is notified and not yet awake. Answers
-  /// its waker, for the caller to wake.
+  /// Notifies the oldest receiver in line, where any is in line, whatever notices are outstanding:
+  /// a notice per commit. Answers its waker, for the caller to wake.
   #[must_use = "the notified receiver's waker is to be woken"]
   pub(crate) fn wake_one(&self) -> Option<Waker> {
     pair_fence();
     if self.count.load(Ordering::SeqCst) == 0 {
       return None;
     }
-    let mut line = lock(&self.line);
-    if line.notified() == 0 {
-      line.notify_oldest().flatten()
-    } else {
-      None
-    }
+    lock(&self.line).notify_oldest().flatten()
   }
 
   /// Notifies every waiting receiver, at a close, each wake owed, for

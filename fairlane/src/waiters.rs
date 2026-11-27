@@ -127,6 +127,7 @@ impl Waiters {
   }
 
   /// Waiters notified, and not yet removed by their holders.
+  #[cfg(test)]
   #[inline]
   pub(crate) fn notified(&self) -> usize {
     self.notified

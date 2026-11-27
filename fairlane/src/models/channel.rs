@@ -304,6 +304,28 @@ fn ma6_a_refreshed_receive_takes_the_commit() {
   });
 }
 
+/// Receiver A is notified and its task never polls it; receiver B waits; two items are committed:
+/// the second commit notifies B, though A's notice is outstanding, so B receives an item.
+#[test]
+fn ma9_an_outstanding_notice_holds_back_no_other_receiver() {
+  model(|| {
+    let (tx, rx) = channel(2);
+    let other = rx.clone();
+    let mut held = rx.recv();
+    assert!(poll_once(&mut held).is_pending());
+    let waiting = thread::spawn(move || other.recv_blocking().unwrap().into_item());
+    let sender = thread::spawn(move || {
+      tx.try_send(Single, 1).unwrap();
+      tx.try_send(Single, 2).unwrap();
+      tx
+    });
+    let item = waiting.join().unwrap();
+    assert!(item == 1 || item == 2);
+    drop(held);
+    drop((sender.join().unwrap(), rx));
+  });
+}
+
 /// A commit against a receiver going to sleep: never an item beside a sleeping receiver that
 /// nobody told.
 #[test]

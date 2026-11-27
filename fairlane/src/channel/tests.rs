@@ -575,3 +575,63 @@ mod differential_lanes;
 mod lanes;
 mod linearizability;
 mod stress;
+
+/// Each commit notifies the next receiver in line, even while an earlier notice is outstanding: a
+/// notified receive whose task is busy elsewhere holds back no other receiver.
+#[test]
+fn each_commit_notifies_the_next_receiver_while_one_is_outstanding() {
+  let (tx, rx) = bounded::<u32>(cap(2)).unwrap();
+  let (first_probe, first_waker) = Probe::new();
+  let (second_probe, second_waker) = Probe::new();
+  let mut first = rx.recv();
+  let mut second = rx.recv();
+  assert!(poll_with(&mut first, &first_waker).is_pending());
+  assert!(poll_with(&mut second, &second_waker).is_pending());
+  tx.try_send(Single, 1).unwrap();
+  assert!(
+    first_probe.take(),
+    "the first commit notifies the oldest receiver"
+  );
+  assert!(!second_probe.take());
+  // The first receive's task is busy elsewhere, and does not poll it yet.
+  tx.try_send(Single, 2).unwrap();
+  assert!(
+    second_probe.take(),
+    "the second commit notifies the next receiver"
+  );
+  assert!(matches!(
+    poll_with(&mut second, &second_waker),
+    Poll::Ready(Ok(_))
+  ));
+  assert!(matches!(
+    poll_with(&mut first, &first_waker),
+    Poll::Ready(Ok(_))
+  ));
+}
+
+/// A notified receive that is cancelled passes its notice on to the next receiver in line, even
+/// while another notice is outstanding.
+#[test]
+fn a_cancelled_notified_receive_passes_its_notice_on_while_another_is_outstanding() {
+  let (tx, rx) = bounded::<u32>(cap(2)).unwrap();
+  let probes: Vec<_> = (0..3).map(|_| Probe::new()).collect();
+  let mut receives: Vec<_> = (0..3).map(|_| rx.recv()).collect();
+  for (receive, (_, waker)) in receives.iter_mut().zip(&probes) {
+    assert!(poll_with(receive, waker).is_pending());
+  }
+  tx.try_send(Single, 1).unwrap();
+  tx.try_send(Single, 2).unwrap();
+  assert!(
+    probes[0].0.take() && probes[1].0.take(),
+    "one notice per commit"
+  );
+  assert!(!probes[2].0.take());
+  drop(receives.remove(0));
+  assert!(
+    probes[2].0.take(),
+    "the cancelled notice passes to the third receiver"
+  );
+  for (receive, (_, waker)) in receives.iter_mut().zip(&probes[1..]) {
+    assert!(matches!(poll_with(receive, waker), Poll::Ready(Ok(_))));
+  }
+}
