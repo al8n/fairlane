@@ -358,10 +358,11 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   /// nothing commits anywhere once any `close` has returned. True for the one call that came
   /// first.
   ///
-  /// Everything a close wakes, its reserves, its receivers and its `closed()` futures, is woken
-  /// once every state change of the close is done: a waker is user code, and one that panics
-  /// leaves no lane open. The wakes are delivered from the waiters' own places, a chunk at a time,
-  /// so fairlane allocates nothing after the first state change.
+  /// Everything a close wakes, its reserves, its receivers and its `closed()` futures, is left owed
+  /// in its waiter's place by the state changes, and delivered after them, a chunk at a time: a
+  /// waker is user code, and one that panics leaves no lane open. A concurrent close, or a lane
+  /// closed by a send that spends its last position, may deliver an owed wake first, while a
+  /// later lane is still open; none is lost.
   pub(crate) fn close(&self) -> bool {
     let first = self.shut();
     let mut wakes = Wakes::new();
