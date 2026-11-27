@@ -366,28 +366,34 @@ fn a_disconnect_wakes_its_waiters_before_dropping_items() {
   );
 }
 
-/// A panic payload that hands the permit it owns on as the payload of a panic of its own.
-struct HandsOver(Option<crate::OwnedPermit<u32, Single, DefaultPolicy<Single>>>);
+type OtherPermit = crate::OwnedPermit<u32, Single, DefaultPolicy<Single>>;
+
+/// A panic payload that panics, at its drop, with the next link of a chain, and the last link with
+/// the permit it carries.
+struct HandsOver(usize, Option<OtherPermit>);
 
 impl Drop for HandsOver {
   fn drop(&mut self) {
-    if let Some(permit) = self.0.take() {
-      std::panic::panic_any(permit);
+    let permit = self.1.take();
+    match self.0 {
+      0 => std::panic::panic_any(permit),
+      links => std::panic::panic_any(HandsOver(links - 1, permit)),
     }
   }
 }
 
-/// An item whose drop panics with a `HandsOver` payload.
-struct Passes(Option<crate::OwnedPermit<u32, Single, DefaultPolicy<Single>>>);
+/// An item whose drop panics with the first link of a long chain of `HandsOver` payloads.
+struct Passes(Option<OtherPermit>);
 
 impl Drop for Passes {
   fn drop(&mut self) {
-    std::panic::panic_any(HandsOver(self.0.take()));
+    std::panic::panic_any(HandsOver(16, self.0.take()));
   }
 }
 
-/// A drained item's panic payload whose drop panics with a payload of its own is disposed of in
-/// turn: the second payload, another channel's permit, is dropped, and its room is given back.
+/// A drained item's panic payload whose drop panics with a payload of its own, and so on along a
+/// long chain, is disposed of link by link to the end: the last payload, another channel's permit,
+/// is dropped, and its room is given back.
 #[test]
 fn a_disposal_drops_the_payload_its_payload_hands_on() {
   let (other, other_rx) = bounded::<u32>(cap(1)).unwrap();

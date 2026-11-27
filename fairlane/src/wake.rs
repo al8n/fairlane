@@ -6,7 +6,7 @@
 //! unrun. The first panic is raised again once every waker has run, or disposed of where the
 //! thread is already unwinding: a second panic there would abort the process.
 
-use core::{any::Any, mem, panic::AssertUnwindSafe, task::Waker};
+use core::{any::Any, panic::AssertUnwindSafe, task::Waker};
 use std::{
   panic::{catch_unwind, resume_unwind},
   thread,
@@ -73,25 +73,18 @@ impl Drop for Wakes {
   }
 }
 
-/// How many payloads one disposal drops in turn, each caught from the drop of the one before.
-///
-/// A payload whose drop panics hands over a payload of its own, which may own something that only
-/// its drop gives back: another channel's permit, for instance. So each is dropped in turn. A
-/// destructor that panics anew at every drop would make the chain endless; past this many links
-/// the last payload is forgotten, a leak, so that a disposal always ends.
-const DISPOSALS: usize = 8;
-
 /// Drops a caught panic's payload, and each payload its drop panics with in turn, each under a
-/// catch of its own, up to [`DISPOSALS`] of them.
+/// catch of its own, until one drop ends without a panic.
+///
+/// A payload whose drop panics hands over a payload of its own, which may own something only its
+/// drop gives back: another channel's permit, for instance. So none is forgotten, however long
+/// the chain. A chain that never ends is a destructor that never returns, like a loop in a `Drop`:
+/// the user's code, and its to end.
 pub(crate) fn dispose(payload: Box<dyn Any + Send>) {
   let mut payload = payload;
-  for _ in 0..DISPOSALS {
-    match catch_unwind(AssertUnwindSafe(move || drop(payload))) {
-      Ok(()) => return,
-      Err(again) => payload = again,
-    }
+  while let Err(again) = catch_unwind(AssertUnwindSafe(move || drop(payload))) {
+    payload = again;
   }
-  mem::forget(payload);
 }
 
 /// Wakes `waker`, as [`Wakes`] does.
