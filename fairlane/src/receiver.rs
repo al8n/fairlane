@@ -711,10 +711,10 @@ impl<T, L: Lane, Y: Policy<L>> fmt::Debug for Receiver<T, L, Y> {
 /// - **Wherever its poll unwinds,** the [`Unwind`] leaves every line the receive is in, passing its
 ///   notifications on, and runs the chain where the receive had spent them and its take unwound. A
 ///   future polled again after joins every line afresh, before it can wait.
-/// - **Dropped while it waits,** it leaves every line and passes on a notification it held. Every
+/// - **Dropped while it waits,** it leaves every line and gives again the notice it held. Every
 ///   line is left first, each under its own lock; then the wakers it let go run, each under its
-///   own catch. So a waker that panics leaves no place behind, and a place left behind would hold
-///   its lane's one notification for ever.
+///   own catch. So a waker that panics leaves no place behind, and the notice of a place left
+///   behind would be held, by a receive no one polls, for ever.
 pub(crate) struct Arrival<L: Lane> {
   /// Its place in each lane it sleeps on.
   keys: PerLane<Option<Key>, L>,
