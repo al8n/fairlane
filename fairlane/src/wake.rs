@@ -4,7 +4,8 @@
 //! and makes the state changes a waker stands for before it runs the waker. [`Wakes`] then runs
 //! each waker's wake or drop under a catch of its own, so that a panic in one leaves no other waker
 //! unrun. The first panic is raised again once every waker has run, or disposed of where the
-//! thread is already unwinding: a second panic there would abort the process.
+//! thread is already unwinding: a second panic there would abort the process. Every later panic is
+//! dropped at once, as it is caught.
 
 use core::{any::Any, panic::AssertUnwindSafe, task::Waker};
 use std::{
@@ -12,7 +13,8 @@ use std::{
   thread,
 };
 
-/// Wakers being run: woken or dropped, each under its own catch.
+/// Wakers being run: woken or dropped, each under its own catch. It keeps the first panic, to be
+/// raised by [`finish`](Self::finish), and drops every later one at once.
 ///
 /// Dropped without [`finish`](Self::finish), on an unwind for instance, it disposes of the panic
 /// it holds.
