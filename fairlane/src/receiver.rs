@@ -20,7 +20,7 @@ use crate::{
   snapshot::Snapshot,
   sync::{Arc, Mutex, Ordering, lock},
   waiters::Key,
-  wake::{Wakes, wake_all},
+  wake::{Staged, Wakes},
 };
 
 /// The receiving half of a channel. Clones share the channel: each item goes to one receive.
@@ -174,9 +174,11 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     let state = self.lane_at(0);
     let lane_limit = quota.limit_at(0);
     let mut held = 0;
-    let mut granted = Vec::new();
+    let mut granted = Staged::new();
     while fits(held, quota.limit(), lane_limit) {
-      if !sink.room(held == 0) {
+      // Room for the item, and a place for the waker its room may be granted to, are both made
+      // before the item leaves its lane: after the pop nothing can fail.
+      if !sink.room(held == 0) || !granted.room() {
         break;
       }
       let Some(popped) = state.ring.pop() else {
@@ -185,7 +187,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
       // The room goes back first, and the item to the sink. The wakers of the reserves the
       // batch's rooms are granted to run once the whole batch is taken, so a waker that panics, or
       // blocks, costs no item and holds back no room.
-      granted.extend(state.release());
+      granted.keep(state.release());
       sink.put(Received {
         item: popped.item,
         lane: self.name(0),
@@ -193,7 +195,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
       });
       held += 1;
     }
-    wake_all(granted);
+    granted.wake();
     match NonZeroUsize::new(held) {
       Some(held) => Took::Items(held),
       None if state.ring.is_ended() => Took::Ended,
@@ -237,6 +239,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     let mut back = RoomBack {
       shared: self,
       units: PerLane::filled(0),
+      granted: Staged::new(),
     };
     reentry::refuse(self.address(), "received");
     let mut guard = lock(choice);
@@ -305,7 +308,9 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
       };
 
       let lane_limit = quota.limit_at(chosen);
-      if !fits(held, limit, lane_limit) || !sink.room(held == 0) {
+      // Room for the item, and a place for the waker its room may be granted to, are both made
+      // before the item leaves its lane: after the pop nothing can fail.
+      if !fits(held, limit, lane_limit) || !sink.room(held == 0) || !back.granted.room() {
         break;
       }
       let state = self.lane_at(chosen);
@@ -412,24 +417,23 @@ impl<T, L: Lane, Y: Policy<L>> Drop for Repair<'_, T, L, Y> {
 
 /// The room of the items one receive took, given back when it is dropped: after the choice lock.
 ///
-/// Every unit is given back before any waker runs: a reserve's waker may block, or send into a
-/// lane whose unit this batch still owes, and it runs only once the batch owes none. The wakers of
-/// the reserves the units are granted to are then woken, each under its own catch. They are kept
-/// in a `Vec`, which allocates only where a reserve waits.
+/// Every unit is given back before any waker runs, and the wakers of the reserves the units are
+/// granted to are then woken, each under its own catch. Each waker's place was made before its
+/// item was taken ([`Staged`]), so keeping it cannot fail.
 struct RoomBack<'a, T, L: Lane, Y: Policy<L>> {
   shared: &'a Shared<T, L, Y>,
   units: PerLane<usize, L>,
+  granted: Staged,
 }
 
 impl<T, L: Lane, Y: Policy<L>> Drop for RoomBack<'_, T, L, Y> {
   fn drop(&mut self) {
-    let mut granted = Vec::new();
     for (index, units) in self.units.as_slice().iter().enumerate() {
       for _ in 0..*units {
-        granted.extend(self.shared.lane_at(index).release());
+        self.granted.keep(self.shared.lane_at(index).release());
       }
     }
-    wake_all(granted);
+    self.granted.wake();
   }
 }
 

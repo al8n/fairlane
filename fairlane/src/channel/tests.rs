@@ -407,6 +407,57 @@ fn a_disposal_drops_the_payload_its_payload_hands_on() {
   drop(other_rx);
 }
 
+/// A batch that grants the room of every item it takes to a waiting reserve wakes every one of
+/// them, past the few wakers it keeps inline: each waker's place is made before its item is taken.
+#[test]
+fn a_batch_wakes_every_reserve_it_grants() {
+  use crate::testing::Three;
+
+  const ITEMS: usize = 12;
+
+  let (tx, rx) = bounded::<u32>(cap(ITEMS)).unwrap();
+  for item in 0..ITEMS {
+    tx.try_send(Single, item as u32).unwrap();
+  }
+  let mut waiting: Vec<_> = (0..ITEMS)
+    .map(|_| {
+      let (probe, waker) = Probe::new();
+      let mut reserve = tx.reserve(Single);
+      assert!(poll_with(&mut reserve, &waker).is_pending());
+      (probe, waker, reserve)
+    })
+    .collect();
+  let mut batch = Vec::new();
+  assert_eq!(rx.try_recv_many(&mut batch, ITEMS), Ok(ITEMS));
+  for (probe, waker, reserve) in &mut waiting {
+    assert!(probe.take(), "every granted reserve is woken");
+    assert!(matches!(poll_with(reserve, waker), Poll::Ready(Ok(_))));
+  }
+
+  let options = Options::from_fn(|_| LaneOptions::new(cap(ITEMS / 2)));
+  let (tx, rx) = channel::<u32, Three>(options).unwrap();
+  for item in 0..ITEMS / 2 {
+    tx.try_send(Three::B, item as u32).unwrap();
+    tx.try_send(Three::C, item as u32).unwrap();
+  }
+  let mut waiting: Vec<_> = [Three::B, Three::C]
+    .into_iter()
+    .flat_map(|lane| (0..ITEMS / 2).map(move |_| lane))
+    .map(|lane| {
+      let (probe, waker) = Probe::new();
+      let mut reserve = tx.reserve(lane);
+      assert!(poll_with(&mut reserve, &waker).is_pending());
+      (probe, waker, reserve)
+    })
+    .collect();
+  let mut batch = Vec::new();
+  assert_eq!(rx.try_recv_many(&mut batch, ITEMS), Ok(ITEMS));
+  for (probe, waker, reserve) in &mut waiting {
+    assert!(probe.take(), "every granted reserve is woken");
+    assert!(matches!(poll_with(reserve, waker), Poll::Ready(Ok(_))));
+  }
+}
+
 #[test]
 fn snapshot_reads_each_lane() {
   let (tx, rx) = bounded::<u32>(cap(4)).unwrap();

@@ -113,6 +113,80 @@ pub(crate) fn wake_all(wakers: Vec<Waker>) {
   wakes.finish();
 }
 
+/// How many wakers [`Staged`] keeps without allocating: a single receive needs one, and a batch of
+/// up to this many items allocates nothing for the reserves it grants room to.
+const STAGED_INLINE: usize = 8;
+
+/// The wakers of the reserves a batch grants room to, kept until the batch has taken every item
+/// and given back every unit, and woken then.
+///
+/// A place for each is made before the item that may produce it leaves its lane, so that keeping
+/// the waker once the item is out never needs memory and cannot fail. The first places are inline;
+/// the rest are in a `Vec`, grown one place at a time, beforehand, and only where a batch takes
+/// more items than the inline places.
+pub(crate) struct Staged {
+  inline: [Option<Waker>; STAGED_INLINE],
+  more: Vec<Waker>,
+  /// Places made.
+  made: usize,
+  /// Places used: one per item taken, whether it produced a waker or not.
+  used: usize,
+}
+
+impl Staged {
+  #[inline]
+  pub(crate) const fn new() -> Self {
+    Self {
+      inline: [const { None }; STAGED_INLINE],
+      more: Vec::new(),
+      made: 0,
+      used: 0,
+    }
+  }
+
+  /// Makes a place for the waker one more item may produce, before the item is taken. False where
+  /// none can be made: the batch stops there, and keeps what it holds.
+  pub(crate) fn room(&mut self) -> bool {
+    if self.made >= STAGED_INLINE {
+      let needed = self.made + 1 - STAGED_INLINE;
+      if self.more.capacity() < needed && self.more.try_reserve(needed - self.more.len()).is_err() {
+        return false;
+      }
+    }
+    self.made += 1;
+    true
+  }
+
+  /// Keeps the waker an item taken produced, where it produced one, in the place made for it.
+  pub(crate) fn keep(&mut self, waker: Option<Waker>) {
+    debug_assert!(self.used < self.made, "a place was made first");
+    let place = self.used;
+    self.used += 1;
+    if let Some(waker) = waker {
+      match self.inline.get_mut(place) {
+        Some(slot) => *slot = Some(waker),
+        None => {
+          debug_assert!(self.more.len() < self.more.capacity());
+          self.more.push(waker);
+        }
+      }
+    }
+  }
+
+  /// Wakes every waker kept, each under its own catch, and raises the first panic again once all
+  /// have run, unless the thread is already unwinding.
+  pub(crate) fn wake(&mut self) {
+    let mut wakes = Wakes::new();
+    for slot in &mut self.inline {
+      wakes.wake(slot.take());
+    }
+    for waker in self.more.drain(..) {
+      wakes.wake(Some(waker));
+    }
+    wakes.finish();
+  }
+}
+
 /// Wakers a reserve no longer needs, kept until the reserve owns its verdict.
 ///
 /// A reserve's poll can end with a waker it cloned and did not store, or one its refresh replaced.
