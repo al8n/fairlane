@@ -520,6 +520,12 @@ impl<T, L: Lane, Y: Policy<L>> Receiver<T, L, Y> {
   /// [`RecvManyError::Ended`] once every lane the quota admits is closed and empty, and
   /// [`RecvManyError::EmptyQuota`] at once for a quota that admits no lane.
   ///
+  /// # Polling when woken
+  ///
+  /// A receive that is woken must be polled promptly, or dropped (the crate's documentation,
+  /// "Wakers, policies and items"). One left unpolled keeps its notice, and can delay other
+  /// receives of the same lanes until it is polled or dropped; it loses no item and no unit.
+  ///
   /// # Panics
   ///
   /// Where the policy panics, or, against its contract (the crate's documentation, "Wakers,
@@ -567,7 +573,8 @@ impl<T, L: Lane, Y: Policy<L>> Receiver<T, L, Y> {
     }
   }
 
-  /// [`recv_many`](Self::recv_many), parking this thread while it waits.
+  /// [`recv_many`](Self::recv_many), parking this thread while it waits. It polls as soon as it is
+  /// woken, so it keeps the receive's contract by itself.
   ///
   /// # Panics
   ///
@@ -606,10 +613,16 @@ impl<T, L: Lane, Y: Policy<L>> Receiver<T, L, Y> {
   ///
   /// - A `Waker` must not panic, block on the channel or wait for another party's progress
   ///   through it, or call into a channel (the crate's documentation, "Wakers, policies and
-  ///   items"): a channel has no executor, and every wake runs on the caller's thread. If one this receive wakes panics anyway, after the item was taken, the panic unwinds
-  ///   out of this call and the item is dropped with it; no room is lost, and every other wake
-  ///   still runs. [`recv_many`](Self::recv_many) keeps such an item in its `into`.
+  ///   items"): a channel has no executor, and every wake runs on the caller's thread. If one this
+  ///   receive wakes panics anyway, after the item was taken, the panic unwinds out of this call
+  ///   and the item is dropped with it; no room is lost, and every other wake still runs.
+  ///   [`recv_many`](Self::recv_many) keeps such an item in its `into`.
   /// - Where the policy panics, the panic unwinds out of this call before any item is taken.
+  ///
+  /// # Polling when woken
+  ///
+  /// As [`recv_many`](Self::recv_many): a receive that is woken must be polled promptly, or
+  /// dropped. One left unpolled can delay the others, and loses no item and no unit.
   #[inline]
   pub fn recv(&self) -> Recv<'_, T, L, Y> {
     Recv {
@@ -639,7 +652,8 @@ impl<T, L: Lane, Y: Policy<L>> Receiver<T, L, Y> {
     }
   }
 
-  /// [`recv`](Self::recv), parking this thread while it waits.
+  /// [`recv`](Self::recv), parking this thread while it waits. It polls as soon as it is woken, so
+  /// it keeps the receive's contract by itself.
   ///
   /// # Panics
   ///

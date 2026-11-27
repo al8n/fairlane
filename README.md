@@ -133,6 +133,11 @@ the thread of the call that set it off.
     its wait.
   - That thread needs no channel lock to get there: every queue guard is let go before it parks.
     So the unpark can delay the wakes after it, but never stop them.
+- **A receive that is woken must be polled promptly, or dropped.** A commit's notice goes to one
+  waiting receive, and a receive holds at most one. One woken and left unpolled keeps its notice,
+  so it can hold back other receives of the same lanes until it is polled or dropped. It delays
+  them; it never loses an item or a unit of capacity. The blocking calls poll as soon as they are
+  woken, so they keep this by themselves.
 - **A `Policy` must not block, and must not call any channel operation, on any channel.** Its
   `stamp` and `owed`, and the clock they read, run while a channel holds its choice lock, or while
   a send holds room it has not committed. A call into a channel there may deadlock, as any callback

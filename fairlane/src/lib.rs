@@ -8,7 +8,9 @@
          docs.rs, this page is the README, with its examples and the contracts your code keeps \
          inside a channel (\"Wakers, policies and items\"): a `Waker` must not panic, block on a \
          channel or wait for another party's progress through it, or call into a channel; a \
-         `Policy` must not block or call into any channel; an item's `Drop` must not block on \
+         receive that is woken must be polled promptly, or dropped, since one left unpolled keeps \
+         its notice and can delay the others, though it loses no item and no unit; a `Policy` \
+         must not block or call into any channel; an item's `Drop` must not block on \
          anyone who waits on the same channel. Fairlane allocates as std does: during a call, an \
          allocation failure aborts the process, as `Vec::push` does; at construction, a capacity \
          that cannot be laid out or allocated is refused as `Malformed::Capacity`."
