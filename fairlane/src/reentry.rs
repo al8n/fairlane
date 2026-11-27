@@ -12,37 +12,82 @@
 
 use core::cell::RefCell;
 
-// The channels whose choice lock this thread holds, by address: more than one only where a policy
-// of one channel receives from another. Under loom, loom's thread-local, one per modelled thread;
-// its macro takes no `const` initializer.
+/// How many channels' choices one thread can be marked inside at once. More than one only where a
+/// policy of one channel receives from another, which the contract forbids; past this depth the
+/// check, which is best effort, does not mark.
+const DEPTH: usize = 8;
+
+/// The channels whose choice lock this thread holds, by address. A fixed table with no
+/// destructor: its first access on a thread registers nothing and allocates nothing.
+#[derive(Clone, Copy)]
+struct Held {
+  channels: [usize; DEPTH],
+  len: usize,
+}
+
+impl Held {
+  const EMPTY: Self = Self {
+    channels: [0; DEPTH],
+    len: 0,
+  };
+
+  fn contains(&self, channel: usize) -> bool {
+    self.channels[..self.len].contains(&channel)
+  }
+}
+
+// Under loom, loom's thread-local, one per modelled thread; its macro takes no `const`
+// initializer.
 #[cfg(not(loom))]
 std::thread_local! {
-  static CHOOSING: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+  static CHOOSING: RefCell<Held> = const { RefCell::new(Held::EMPTY) };
 }
 #[cfg(loom)]
 loom::thread_local! {
-  static CHOOSING: RefCell<Vec<usize>> = RefCell::new(Vec::new());
+  static CHOOSING: RefCell<Held> = RefCell::new(Held::EMPTY);
 }
 
 /// This thread holds the choice lock of the channel at an address, until the guard is dropped.
 #[must_use = "the marker lasts as long as the guard"]
-pub(crate) struct Choosing(usize);
+pub(crate) struct Choosing {
+  channel: usize,
+  /// Whether the table had room for the mark.
+  marked: bool,
+}
 
 impl Choosing {
-  /// Marks the channel at `channel` as chosen for on this thread. The list keeps its capacity, so
-  /// a receive allocates nothing after the thread's first.
+  /// Marks the channel at `channel` as chosen for on this thread. Allocates nothing.
   pub(crate) fn enter(channel: usize) -> Self {
-    let _ = CHOOSING.try_with(|held| held.borrow_mut().push(channel));
-    Self(channel)
+    let marked = CHOOSING
+      .try_with(|held| {
+        let mut held = held.borrow_mut();
+        let len = held.len;
+        if len == DEPTH {
+          return false;
+        }
+        held.channels[len] = channel;
+        held.len = len + 1;
+        true
+      })
+      .unwrap_or(false);
+    Self { channel, marked }
   }
 }
 
 impl Drop for Choosing {
   fn drop(&mut self) {
+    if !self.marked {
+      return;
+    }
     let _ = CHOOSING.try_with(|held| {
       let mut held = held.borrow_mut();
-      if let Some(at) = held.iter().rposition(|&channel| channel == self.0) {
-        held.remove(at);
+      let len = held.len;
+      if let Some(at) = held.channels[..len]
+        .iter()
+        .rposition(|&channel| channel == self.channel)
+      {
+        held.channels.copy_within(at + 1..len, at);
+        held.len = len - 1;
       }
     });
   }
@@ -56,7 +101,7 @@ impl Drop for Choosing {
 #[inline]
 pub(crate) fn refuse(channel: usize, door: &str) {
   let inside = CHOOSING
-    .try_with(|held| held.borrow().contains(&channel))
+    .try_with(|held| held.borrow().contains(channel))
     .unwrap_or(false);
   if inside {
     reentered(door);
@@ -71,3 +116,6 @@ fn reentered(door: &str) -> ! {
      lane choice: it would wait for ever on the choice lock this thread holds"
   )
 }
+
+#[cfg(test)]
+mod tests;
