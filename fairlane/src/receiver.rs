@@ -406,18 +406,34 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   }
 }
 
-/// A receive that spent its notifications and then took nothing in full: dropped while armed, on
-/// an unwind out of the take, it runs the chain, so that the receivers it would have woken by
-/// taking are woken still.
-struct Repair<'a, T, L: Lane, Y: Policy<L>> {
+/// What a receive's take owes the other receivers, should it unwind: whatever the panic, a
+/// destination that cannot grow or a `Lane` or policy method. Dropped while armed, after the
+/// take's own locks are let go:
+///
+/// - **The places the receive still holds** are left as a dropped receive leaves them, each
+///   notification passed on to the next receiver in its line. A notification held across the
+///   unwind would hold its lane's line for as long as the future is kept, and wake nobody.
+/// - **Where the receive spent its notifications** in this poll, the chain runs, so that the
+///   receivers it would have woken by taking are woken still.
+///
+/// A future polled again after the unwind joins the lines afresh.
+struct Unwind<'a, T, L: Lane, Y: Policy<L>> {
+  arrival: &'a mut Arrival<L>,
   shared: &'a Shared<T, L, Y>,
   quota: &'a Quota<L>,
+  spent: bool,
   armed: bool,
 }
 
-impl<T, L: Lane, Y: Policy<L>> Drop for Repair<'_, T, L, Y> {
+impl<T, L: Lane, Y: Policy<L>> Drop for Unwind<'_, T, L, Y> {
   fn drop(&mut self) {
-    if self.armed {
+    if !self.armed {
+      return;
+    }
+    let mut wakes = Wakes::new();
+    self.arrival.leave(self.shared, false, &mut wakes);
+    wakes.finish();
+    if self.spent {
       self.shared.chain(self.quota);
     }
   }
@@ -660,8 +676,9 @@ impl<T, L: Lane, Y: Policy<L>> fmt::Debug for Receiver<T, L, Y> {
 ///   future the moment it exists, so a waker clone that panics on a later lane leaves the earlier
 ///   places to the future's drop. A future polled again after such a panic joins the lines it had
 ///   not joined, before it can wait: a lane it is missing from would never wake it.
-/// - **On waking** it leaves every line, spending its notifications, and takes. Where that take
-///   unwinds, a [`Repair`] runs the chain the take would have run.
+/// - **On waking** it leaves every line, spending its notifications, and takes. Where a take
+///   unwinds, an [`Unwind`] leaves every line the receive is still in, passing its notifications
+///   on, and runs the chain the take would have run where it had spent them.
 /// - **Dropped while it waits,** it leaves every line and passes on a notification it held. Every
 ///   line is left first, each under its own lock; then the wakers it let go run, each under its
 ///   own catch. So a waker that panics leaves no place behind, and a place left behind would hold
@@ -747,13 +764,18 @@ impl<L: Lane> Arrival<L> {
     let mut wakes = Wakes::new();
     let mut spent = false;
     let polled = loop {
-      let mut repair = Repair {
-        shared,
-        quota,
-        armed: spent,
+      let took = {
+        let mut unwind = Unwind {
+          arrival: &mut *self,
+          shared,
+          quota,
+          spent,
+          armed: true,
+        };
+        let took = shared.take(quota, sink);
+        unwind.armed = false;
+        took
       };
-      let took = shared.take(quota, sink);
-      repair.armed = false;
       spent = false;
       match took {
         Took::Items(held) => {

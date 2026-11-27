@@ -394,3 +394,58 @@ fn a_stamp_that_panics_refunds_before_the_item_drops() {
   assert!(slot.lock().unwrap().is_none(), "the item joined the sender");
   assert_eq!(tx.snapshot().senders_waiting(Three::B), 0);
 }
+
+/// A policy whose `owed` panics while armed.
+#[derive(Default)]
+struct Moody {
+  armed: AtomicBool,
+}
+
+impl Policy<Three> for Moody {
+  type Stamp = ();
+
+  fn stamp(&self) {}
+
+  fn owed(&self, _: &LaneView<Three, ()>) -> Option<Three> {
+    if self.armed.load(Ordering::SeqCst) {
+      panic!("a policy that panics");
+    }
+    None
+  }
+}
+
+/// A woken receive whose take unwinds strands no other receiver: the notifications it held pass to
+/// the next receiver in line, which takes the item, and the receive that unwound takes the other
+/// when polled again.
+#[test]
+fn a_receive_whose_take_unwinds_passes_its_notifications_on() {
+  let options = Options::from_fn(|_| LaneOptions::new(cap(1)));
+  let (tx, rx) = channel_with::<u32, Three, Moody>(options, Moody::default()).unwrap();
+  let (first_probe, first_waker) = Probe::new();
+  let (second_probe, second_waker) = Probe::new();
+  let mut first = rx.recv();
+  let mut second = rx.recv();
+  assert!(poll_with(&mut first, &first_waker).is_pending());
+  assert!(poll_with(&mut second, &second_waker).is_pending());
+  tx.try_send(Three::B, 1).unwrap();
+  tx.try_send(Three::C, 2).unwrap();
+  assert!(first_probe.take(), "the oldest receiver is notified");
+  assert!(!second_probe.take(), "and only the oldest");
+
+  rx.policy().armed.store(true, Ordering::SeqCst);
+  let unwound = catch_unwind(AssertUnwindSafe(|| poll_with(&mut first, &first_waker)));
+  rx.policy().armed.store(false, Ordering::SeqCst);
+  assert!(unwound.is_err(), "the policy panicked inside the take");
+  assert!(
+    second_probe.take(),
+    "the notifications passed to the next receiver"
+  );
+  assert!(matches!(
+    poll_with(&mut second, &second_waker),
+    Poll::Ready(Ok(_))
+  ));
+  assert!(
+    matches!(poll_with(&mut first, &first_waker), Poll::Ready(Ok(_))),
+    "the receive that unwound takes the other item"
+  );
+}
