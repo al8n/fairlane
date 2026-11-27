@@ -1,0 +1,5 @@
+error: `express` is given twice
+ --> tests/ui/twice.rs:3:23
+  |
+3 |   #[fairlane(express, express)]
+  |                       ^^^^^^^

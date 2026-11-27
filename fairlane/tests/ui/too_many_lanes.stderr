@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: `TooMany` has 257 lanes, more than a fairlane channel holds (see `Lane::N`)
+ --> tests/ui/too_many_lanes.rs:1:10
+  |
+1 | #[derive(fairlane::Lane)]
+  |          ^^^^^^^^^^^^^^ evaluation of `_` failed here

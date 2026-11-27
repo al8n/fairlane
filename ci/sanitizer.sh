@@ -35,18 +35,22 @@ set -eu
 TARGET="${1:-x86_64-unknown-linux-gnu}"
 SANITIZERS="${2:-address}"
 
-export ASAN_OPTIONS="detect_odr_violation=0 detect_leaks=0"
+# `allocator_may_return_null=1`: an allocation no system can give returns null, as it does without
+# a sanitizer, so the ring's law for a refused allocation runs here too instead of aborting.
+export ASAN_OPTIONS="detect_odr_violation=0 detect_leaks=0 allocator_may_return_null=1"
+export TSAN_OPTIONS="allocator_may_return_null=1"
+export MSAN_OPTIONS="allocator_may_return_null=1"
 
 for san in $SANITIZERS; do
   echo "=== sanitizer: ${san} on ${TARGET} ==="
   case "$san" in
     memory | thread)
       RUSTFLAGS="-Z sanitizer=${san}" \
-        cargo -Zbuild-std test --tests --target "$TARGET" --all-features
+        cargo -Zbuild-std test -p fairlane --tests --target "$TARGET" --all-features
       ;;
     *)
       RUSTFLAGS="-Z sanitizer=${san}" \
-        cargo test --tests --target "$TARGET" --all-features
+        cargo test -p fairlane --tests --target "$TARGET" --all-features
       ;;
   esac
 done

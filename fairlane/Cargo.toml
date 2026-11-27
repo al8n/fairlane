@@ -1,0 +1,81 @@
+[package]
+name = "fairlane"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://docs.rs/fairlane"
+description = "A bounded multi-lane MPMC channel: a bound per lane, an anti-starvation policy, batched receives, and both awaited and blocking doors."
+
+[features]
+default = []
+# `#[derive(Lane)]`, re-exported beside the trait.
+derive = ["dep:fairlane-derive"]
+# `Serialize` and `Deserialize` for `LaneOptions`, `Options` and `PerLane`: a map keyed by
+# `Lane::as_str`, every lane required.
+serde = ["dep:serde_core"]
+# `Policy` for `either::Either`: one policy of two, chosen at run time.
+either = ["dep:either"]
+# `ManualClock`, a clock a test sets.
+test-util = []
+# Builds the crate's atomics, cells and locks on loom, for the models in `src/models`. It takes
+# effect only under `--cfg loom`.
+loom = ["dep:loom"]
+
+[dependencies]
+fairlane-derive = { workspace = true, optional = true }
+crossbeam-utils = "0.8"
+hybrid-array = "0.4"
+# `const-generics` gives `typenum::U<N>`, which the derive's output names.
+typenum = { version = "1", features = ["const-generics"] }
+
+either = { version = "1", optional = true, default-features = false }
+serde_core = { version = "1", optional = true, default-features = false }
+
+[target.'cfg(loom)'.dependencies]
+loom = { version = "0.7", optional = true, features = ["futures"] }
+
+[dev-dependencies]
+# A format that is not self-describing, for the binary form of the serde impls.
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+serde_json = "1"
+# serde's own tokens, for the human-readable and compact forms of the serde impls.
+serde_test = "1"
+trybuild = "1"
+
+[lints]
+workspace = true
+
+# Without `bench = false`, `cargo bench` also builds the lib under libtest's bench harness.
+[lib]
+bench = false
+
+# A global allocator that refuses one request, and no harness, so that no other thread allocates.
+[[test]]
+name = "alloc_refusal"
+path = "tests/alloc_refusal.rs"
+harness = false
+
+# A process-wide panic hook, and no harness, so that no other test's panic reaches it.
+[[test]]
+name = "panic_hook"
+path = "tests/panic_hook.rs"
+harness = false
+
+[[test]]
+name = "derive_ui"
+path = "tests/derive_ui.rs"
+required-features = ["derive"]
+
+[[test]]
+name = "derive"
+path = "tests/derive.rs"
+required-features = ["derive"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

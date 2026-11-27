@@ -10,6 +10,7 @@ name: CI
 #
 #   macos.yml, windows.yml    the `macos-latest` and `windows-latest` legs of clippy, build and test
 #   miri-tb.yml, miri-sb.yml  Miri under Tree Borrows and under Stacked Borrows
+#   loom.yml                  the loom models of the ring and the channel's waits
 #   perf.yml                  the criterion benches, run once as a smoke check
 #   coverage.yml              cargo-llvm-cov, uploaded to codecov; never a required check
 #
@@ -65,9 +66,9 @@ jobs:
       - name: cargo +stable fmt --all -- --check
         run: cargo +stable fmt --all -- --check
 
-  # Every feature alone, plus none and all. With today's tiers that is `no features`, `alloc`, `std`
-  # and `std + alloc`. `--tests` lints test code as well; examples and benches have no feature
-  # matrix of their own and are linted once, with everything on, by the second step.
+  # Every feature alone, plus none and all, for every member. `--tests` lints test code as well;
+  # the benches have no feature matrix of their own and are linted once, with everything on, by
+  # the second step.
   #
   # The single-entry `os` matrix keeps the check named `clippy (ubuntu-latest)`, as it was while
   # the macOS and Windows legs were rows of it. The same goes for `build` and `test`.
@@ -99,15 +100,14 @@ jobs:
       # Kept the same in macos.yml and windows.yml. `--keep-going` reports every failing feature
       # combination in one run instead of stopping at the first.
       - name: cargo hack clippy --each-feature --tests
-        run: cargo hack clippy --each-feature --tests --keep-going -- -D warnings
-      - name: cargo clippy --all-features --all-targets
-        run: cargo clippy --all-features --all-targets -- -D warnings
+        run: cargo hack clippy --workspace --each-feature --tests --keep-going -- -D warnings
+      - name: cargo clippy --workspace --all-features --all-targets
+        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
 
   # The library as a consumer builds it: no dev-dependencies, so no feature one of them would
   # switch on. `--feature-powerset` builds every combination of the crate's features, the empty one
-  # included. With today's tiers that is `no features`, `alloc`, `std` and `std + alloc`, the four
-  # builds the house tier rules ask for. A crate with many features makes the powerset large:
-  # change it to `--each-feature`, or bound it with `--depth 2`.
+  # included. `loom` is left out: without `--cfg loom` it only names dependencies that are not
+  # built, and `loom.yml` builds it with the cfg.
   build:
     name: build
     strategy:
@@ -134,7 +134,7 @@ jobs:
         with:
           tool: cargo-hack
       - name: cargo hack build --feature-powerset
-        run: cargo hack build --feature-powerset --keep-going
+        run: cargo hack build --workspace --feature-powerset --exclude-features loom --keep-going
 
   test:
     name: test
@@ -162,46 +162,11 @@ jobs:
         with:
           tool: cargo-hack
       - name: cargo hack test --feature-powerset
-        run: cargo hack test --feature-powerset --keep-going
+        run: cargo hack test --workspace --feature-powerset --exclude-features loom --keep-going
       # The profile users ship. `debug_assertions` and overflow checks are what separate the two
       # profiles, and a suite that only runs in debug cannot see a divergence between them.
       - name: cargo test --release --all-features
-        run: cargo test --release --all-features
-
-  # A host build cannot show that a crate is `no_std`: `std` is linkable on the host whether or
-  # not the crate reaches for it. These targets have no `std`, so a crate that links it does not
-  # build. Two cores, because they differ where it matters: `thumbv6m-none-eabi` has no atomic
-  # compare-and-swap, so an `Arc` fails there, and `thumbv7em-none-eabihf` has it. The core tier
-  # and the `alloc` tier are built; the `std` tier has no bare-metal build to make.
-  no-std:
-    name: no-std
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - thumbv6m-none-eabi
-          - thumbv7em-none-eabihf
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Cache cargo build and registry
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-nostd-${{ matrix.target }}-${{ hashFiles('**/Cargo.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-nostd-${{ matrix.target }}-
-      - name: Install Rust
-        run: rustup update stable --no-self-update && rustup default stable
-      - name: rustup target add ${{ matrix.target }}
-        run: rustup target add ${{ matrix.target }}
-      - name: cargo build --target ${{ matrix.target }} --no-default-features
-        run: cargo build --target ${{ matrix.target }} --no-default-features
-      - name: cargo build --target ${{ matrix.target }} --no-default-features --features alloc
-        run: cargo build --target ${{ matrix.target }} --no-default-features --features alloc
+        run: cargo test --workspace --release --all-features
 
   # Every other job runs `rustup update stable`, so without this one the declared MSRV is never
   # exercised and drifts upward unnoticed. The toolchain is READ from Cargo.toml: to move the
@@ -259,13 +224,13 @@ jobs:
               ;;
           esac
       # `--lib` because the floor is a promise to consumers, who never build dev-dependencies. The
-      # last line covers every feature a crate adds later.
-      - name: cargo +${{ steps.msrv.outputs.version }} check --lib, each tier
+      # bench member is not published and its competitors set floors of their own, so it is left
+      # out. The last line covers every feature the crate adds later.
+      - name: cargo +${{ steps.msrv.outputs.version }} check --lib
         run: |
-          cargo "+$MSRV" check --lib --no-default-features
-          cargo "+$MSRV" check --lib --no-default-features --features alloc
-          cargo "+$MSRV" check --lib --no-default-features --features std
-          cargo "+$MSRV" check --lib --all-features
+          cargo "+$MSRV" check -p fairlane --lib --no-default-features
+          cargo "+$MSRV" check -p fairlane-derive --lib
+          cargo "+$MSRV" check -p fairlane --lib --all-features
 
   doc:
     name: doc
@@ -287,11 +252,11 @@ jobs:
       - name: Install Rust
         run: rustup update stable --no-self-update && rustup default stable
       - name: cargo doc --all-features --no-deps
-        run: cargo doc --all-features --no-deps
+        run: cargo doc --workspace --all-features --no-deps
       # The only leg that sees a broken link into a feature-gated item from an ungated one:
       # `--all-features` documents every item, so such a link always resolves there.
       - name: cargo doc --no-default-features --no-deps
-        run: cargo doc --no-default-features --no-deps
+        run: cargo doc --workspace --no-default-features --no-deps
       # The configuration docs.rs builds with. `#[cfg_attr(docsrs, doc(cfg(...)))]` is inert
       # without `--cfg docsrs`, so the two steps above cannot tell a correct attribute from a
       # misapplied one, and a fault only this leg sees is a published-docs failure found after the
@@ -301,7 +266,7 @@ jobs:
       - name: cargo +nightly doc --all-features --no-deps, with --cfg docsrs
         env:
           RUSTDOCFLAGS: --cfg docsrs -D warnings
-        run: cargo +nightly doc --all-features --no-deps
+        run: cargo +nightly doc --workspace --all-features --no-deps
 
   # A matrix of independent questions, so `fail-fast: false`: one target that cannot build must
   # not cancel the other fourteen and turn them into `fail` in `gh pr checks`.
@@ -341,19 +306,20 @@ jobs:
             ${{ runner.os }}-cross-${{ matrix.target }}-
       - name: Install Rust
         run: rustup update stable --no-self-update && rustup default stable
+      # Every target here has 64-bit atomics, which the crate requires.
       - name: cargo build --all-features --target ${{ matrix.target }}
         run: |
           rustup target add ${{ matrix.target }}
-          cargo build --all-features --target ${{ matrix.target }}
+          cargo build -p fairlane --all-features --target ${{ matrix.target }}
 
-  # Nightly, and only here. `address` is the one sanitizer in the matrix; `ci/sanitizer.sh` says
-  # why the other three are not, and how to add them.
+  # Nightly, and only here. `address`, and `thread`, since the crate shares state between threads;
+  # `ci/sanitizer.sh` says why the other two are not, and how to add them.
   sanitizer:
     name: sanitizer
     strategy:
       fail-fast: false
       matrix:
-        san: [address]
+        san: [address, thread]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -395,8 +361,10 @@ jobs:
             ${{ runner.os }}-publish-dry-run-
       - name: Install Rust
         run: rustup update stable --no-self-update && rustup default stable
-      - name: cargo publish --dry-run
-        run: cargo publish --dry-run
+      # `--workspace` packages fairlane-derive and fairlane together, so the dry run of fairlane
+      # resolves the derive it has not published yet.
+      - name: cargo publish --workspace --dry-run
+        run: cargo publish --workspace --dry-run
 
   # Seconds, no toolchain. The self-test runs first and is not optional: a checker that cannot fail
   # is not a check, and a green from it means nothing until it has been seen to go red.
@@ -409,3 +377,25 @@ jobs:
         run: bash ci/changelog.sh selftest
       - name: ci/changelog.sh check
         run: bash ci/changelog.sh check
+
+  # The derive's refusals as the compiler shows them. trybuild is heavy, so it runs here and never
+  # locally; the same refusals are unit tests of the expansion in fairlane-derive.
+  trybuild:
+    name: trybuild
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Cache cargo build and registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-trybuild-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-trybuild-
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable
+      - name: cargo test -p fairlane --features derive --test derive_ui -- --ignored
+        run: cargo test -p fairlane --features derive --test derive_ui -- --ignored

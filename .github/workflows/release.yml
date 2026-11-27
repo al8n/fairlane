@@ -24,8 +24,9 @@ name: Release
 #
 #   * the tagged commit is on `main`;
 #   * every workflow in REQUIRED_WORKFLOWS has a green run on `main` for that exact commit. That is
-#     `ci.yml`, the two Miri workflows, `macos.yml` and `windows.yml`. A paused workflow has no such
-#     run: enable it, and run it on `main` (`gh workflow run macos.yml --ref main`) before tagging.
+#     `ci.yml`, the two Miri workflows, `macos.yml`, `windows.yml` and `loom.yml`. A paused
+#     workflow has no such run: enable it, and run it on `main` (`gh workflow run macos.yml --ref
+#     main`) before tagging.
 #     Drop a lane the crate does not have from the list;
 #   * the version in Cargo.toml is the tag without its `v`, is not the placeholder `0.0.0`, and is
 #     not on crates.io yet;
@@ -59,7 +60,9 @@ env:
   # The branch a release comes from, and the workflows (file names, space separated) that must be
   # green on the released commit. Each is a one-line change.
   MAIN_BRANCH: main
-  REQUIRED_WORKFLOWS: ci.yml miri-tb.yml miri-sb.yml macos.yml windows.yml
+  REQUIRED_WORKFLOWS: ci.yml miri-tb.yml miri-sb.yml macos.yml windows.yml loom.yml
+  # The packages a release publishes, in this order: fairlane depends on the derive.
+  PUBLISH_ORDER: fairlane-derive fairlane
 
 jobs:
   verify:
@@ -94,17 +97,20 @@ jobs:
             exit 1
           }
 
-          # What is being released.
+          # What is being released: every package of the workspace that can be published, in the
+          # order of PUBLISH_ORDER, all at the workspace's one version.
           metadata=$(cargo metadata --no-deps --format-version 1)
           packages=$(jq -c '[.packages[] | select(.publish == null or (.publish | index("crates-io")))]' <<<"$metadata")
-          [[ $(jq length <<<"$packages") == 1 ]] \
-            || fail "expected exactly one package that can be published to crates.io, found: $(jq -r 'map(.name) | join(", ")' <<<"$packages")"
-          name=$(jq -r '.[0].name' <<<"$packages")
+          found=$(jq -r 'map(.name) | sort | join(" ")' <<<"$packages")
+          expected=$(tr ' ' '\n' <<<"$PUBLISH_ORDER" | sort | tr '\n' ' ' | sed 's/ $//')
+          [[ "$found" == "$expected" ]] \
+            || fail "PUBLISH_ORDER names '$expected', and the packages that can be published are '$found'"
+          [[ $(jq -r 'map(.version) | unique | length' <<<"$packages") == 1 ]] \
+            || fail "the published packages must share one version: $(jq -r 'map(.name + " " + .version) | join(", ")' <<<"$packages")"
+          name=fairlane
           version=$(jq -r '.[0].version' <<<"$packages")
           tag="v$version"
 
-          [[ "$name" != template-rs ]] \
-            || fail "the package is still named template-rs. Rename it in Cargo.toml before releasing; the README lists what else carries the name."
           [[ "$version" != 0.0.0 ]] \
             || fail "0.0.0 is the placeholder version. It is published by hand to reserve the name (see the header of release.yml); release 0.1.0 or later through this workflow."
 
@@ -155,8 +161,9 @@ jobs:
             echo "ok: $workflow is green on ${GITHUB_SHA:0:12}"
           done
 
-          # crates.io: the crate must exist, because trusted publishing cannot be configured for one
-          # that does not, and this version must not.
+          # crates.io: each crate must exist, because trusted publishing cannot be configured for
+          # one that does not, and this version must not.
+          for name in $PUBLISH_ORDER; do
           crate_json="$RUNNER_TEMP/crate.json"
           status=$(curl --silent --show-error --output "$crate_json" --write-out '%{http_code}' \
             --user-agent "release-workflow ($GITHUB_REPOSITORY)" \
@@ -183,9 +190,12 @@ jobs:
           if jq -e --arg v "$version" 'any(.versions[]; .num == $v)' "$crate_json" >/dev/null; then
             fail "$name $version is on crates.io already, and a version cannot be published twice. Bump the version."
           fi
+          done
+          name=fairlane
 
-          # The package builds from its own tarball.
-          cargo publish --dry-run
+          # The packages build from their own tarballs. `--workspace` packages them together, so
+          # fairlane's dry run resolves the derive that is not published yet.
+          cargo publish --workspace --dry-run
 
           {
             echo "name=$name"
@@ -244,7 +254,9 @@ jobs:
             echo "::error::the token exchange succeeded but returned no token, so there is nothing to publish with"
             exit 1
           fi
-          cargo publish
+          for package in $PUBLISH_ORDER; do
+            cargo publish -p "$package"
+          done
 
   github-release:
     name: Create the GitHub Release

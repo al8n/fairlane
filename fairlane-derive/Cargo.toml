@@ -1,0 +1,23 @@
+[package]
+name = "fairlane-derive"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://docs.rs/fairlane-derive"
+description = "`#[derive(Lane)]` for fairlane. Use it through fairlane's `derive` feature."
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", default-features = false, features = ["derive", "parsing", "printing", "proc-macro"] }
+
+[lints]
+workspace = true

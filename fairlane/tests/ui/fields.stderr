@@ -1,0 +1,5 @@
+error: a lane is a unit variant: it cannot carry fields
+ --> tests/ui/fields.rs:4:6
+  |
+4 |   Two(u8),
+  |      ^^^^

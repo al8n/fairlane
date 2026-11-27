@@ -1,0 +1,769 @@
+//! Laws of a channel of several lanes.
+
+use core::{
+  num::{NonZeroU32, NonZeroUsize},
+  panic::AssertUnwindSafe,
+  sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+};
+use std::panic::catch_unwind;
+
+use super::*;
+use crate::{
+  FirstOf, LaneView, PassLimit, Policy, Quota, Received, Strict,
+  lane::Lane,
+  testing::{Faults, Three},
+};
+
+/// Three lanes of `capacity`; lane A express where `express`.
+fn three(capacity: usize, express: bool) -> Options<Three> {
+  Options::from_fn(|lane| {
+    let options = LaneOptions::new(cap(capacity));
+    if lane == Three::A {
+      options.with_express(express)
+    } else {
+      options
+    }
+  })
+}
+
+fn lanes_of(batch: &[Received<u32, Three>]) -> Vec<Three> {
+  batch.iter().map(Received::lane).collect()
+}
+
+#[test]
+fn lanes_refuse_malformed_options() {
+  let behind = three(1, false).with_lane(Three::C, LaneOptions::new(cap(1)).with_express(true));
+  assert_eq!(
+    channel::<u8, Three>(behind).unwrap_err(),
+    Malformed::ExpressBehind(2)
+  );
+  let huge = three(1, false).with_lane(Three::B, LaneOptions::new(NonZeroUsize::MAX));
+  assert_eq!(
+    channel::<u8, Three>(huge).unwrap_err(),
+    Malformed::Capacity(1)
+  );
+}
+
+#[test]
+fn lanes_serve_in_priority_order() {
+  let (tx, rx) = channel_with::<u32, Three, _>(three(4, false), Strict).unwrap();
+  tx.try_send(Three::C, 3).unwrap();
+  tx.try_send(Three::B, 2).unwrap();
+  tx.try_send(Three::A, 1).unwrap();
+  let mut batch = Vec::new();
+  assert_eq!(rx.try_recv_many(&mut batch, 8), Ok(3));
+  assert_eq!(lanes_of(&batch), [Three::A, Three::B, Three::C]);
+}
+
+#[test]
+fn lanes_serve_an_express_lane_first() {
+  let (tx, rx) = channel_with::<u32, Three, _>(three(4, true), Strict).unwrap();
+  tx.try_send(Three::B, 2).unwrap();
+  tx.try_send(Three::A, 1).unwrap();
+  let first = rx.try_recv().unwrap().unwrap();
+  assert_eq!(first.lane(), Three::A);
+}
+
+#[test]
+fn lanes_admit_only_the_quota_range() {
+  let (tx, rx) = channel_with::<u32, Three, _>(three(4, false), Strict).unwrap();
+  tx.try_send(Three::A, 1).unwrap();
+  tx.try_send(Three::C, 3).unwrap();
+  let mut batch = Vec::new();
+  assert_eq!(
+    rx.try_recv_many(&mut batch, Quota::up_to(8).lanes(Three::B..)),
+    Ok(1)
+  );
+  assert_eq!(lanes_of(&batch), [Three::C]);
+  assert_eq!(tx.snapshot().queued(Three::A), 1);
+}
+
+#[test]
+fn lanes_ordinals_are_per_lane() {
+  let (tx, rx) = channel_with::<u32, Three, _>(three(8, false), Strict).unwrap();
+  let other = rx.clone();
+  for round in 0..4 {
+    tx.try_send(Three::B, round).unwrap();
+    tx.try_send(Three::C, round).unwrap();
+  }
+  let mut next = [0_u64; 3];
+  for turn in 0..8 {
+    let receiver = if turn % 2 == 0 { &rx } else { &other };
+    let received = receiver.try_recv().unwrap().unwrap();
+    let index = received.lane().index();
+    assert_eq!(received.ordinal(), next[index]);
+    next[index] += 1;
+  }
+  assert_eq!(next, [0, 4, 4]);
+}
+
+/// Owes `owed` once its passed-over count reaches `limit`; every other lane may starve.
+fn owe(owed: Three, limit: u32) -> PassLimit<Three> {
+  Three::ALL
+    .iter()
+    .fold(PassLimit::new(NonZeroU32::MIN), |policy, &lane| {
+      policy.with_lane(
+        lane,
+        (lane == owed).then(|| NonZeroU32::new(limit).unwrap()),
+      )
+    })
+}
+
+/// A batch stops at a lane's limit and never passes the lane over.
+#[test]
+fn x4_a_batch_stops_at_a_lane_limit() {
+  let (tx, rx) = channel_with::<u32, Three, _>(three(64, false), owe(Three::B, 2)).unwrap();
+  for item in 0..64 {
+    tx.try_send(Three::A, item).unwrap();
+    tx.try_send(Three::B, 100 + item).unwrap();
+  }
+  let mut batch = Vec::new();
+  for _ in 0..2 {
+    assert_eq!(rx.try_recv_many(&mut batch, 1), Ok(1));
+  }
+  assert_eq!(lanes_of(&batch), [Three::A, Three::A]);
+  batch.clear();
+  let quota = Quota::up_to(32)
+    .limit_with(Three::A, 1)
+    .limit_with(Three::B, 32);
+  assert_eq!(rx.try_recv_many(&mut batch, &quota), Ok(1));
+  assert_eq!(lanes_of(&batch), [Three::B], "the batch stops at A's limit");
+  batch.clear();
+  assert_eq!(rx.try_recv_many(&mut batch, &quota), Ok(1));
+  assert_eq!(lanes_of(&batch), [Three::A]);
+}
+
+/// Panics on its second `owed`; counts its calls.
+struct PanicsOnSecond(AtomicUsize);
+
+impl Policy<Three> for PanicsOnSecond {
+  type Stamp = ();
+
+  fn stamp(&self) {}
+
+  fn owed(&self, _: &LaneView<Three, ()>) -> Option<Three> {
+    if self.0.fetch_add(1, Ordering::SeqCst) == 1 {
+      panic!("a policy that panics");
+    }
+    None
+  }
+}
+
+/// A policy that panics inside a batch loses no item and leaks no room.
+#[test]
+fn g4_a_panicking_policy_loses_no_item() {
+  let policy = PanicsOnSecond(AtomicUsize::new(0));
+  let (tx, rx) = channel_with::<u32, Three, _>(three(4, false), policy).unwrap();
+  for item in 0..3 {
+    tx.try_send(Three::B, item).unwrap();
+    tx.try_send(Three::C, 10 + item).unwrap();
+  }
+  let mut batch = Vec::new();
+  let hook = std::panic::take_hook();
+  std::panic::set_hook(Box::new(|_| {}));
+  let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    rx.try_recv_many(&mut batch, 8)
+  }));
+  std::panic::set_hook(hook);
+  assert!(unwound.is_err(), "the policy panicked on its second call");
+  assert_eq!(
+    lanes_of(&batch),
+    [Three::B],
+    "the item taken before the panic is the caller's"
+  );
+  let snapshot = tx.snapshot();
+  assert_eq!(snapshot.remaining(Three::B), 2, "its room is back");
+  assert_eq!(snapshot.queued(Three::B) + snapshot.queued(Three::C), 5);
+  batch.clear();
+  assert_eq!(
+    rx.try_recv_many(&mut batch, 8),
+    Ok(5),
+    "the choice lock reads through"
+  );
+}
+
+/// Three lanes kept full, `PassLimit(f)` on each: between two items of a lane, at most
+/// `f + n - 1` items of other lanes.
+#[test]
+fn x3_o4_the_count_bounds_a_lanes_wait() {
+  let f = 3;
+  let (tx, rx) =
+    channel_with::<u32, Three, _>(three(4, false), PassLimit::new(NonZeroU32::new(f).unwrap()))
+      .unwrap();
+  let mut served = Vec::new();
+  for round in 0..90 {
+    for lane in Three::ALL {
+      while tx.try_send(lane, round).is_ok() {}
+    }
+    served.push(rx.try_recv().unwrap().unwrap().lane());
+  }
+  for lane in Three::ALL {
+    let at: Vec<usize> = served
+      .iter()
+      .enumerate()
+      .filter(|(_, each)| **each == lane)
+      .map(|(index, _)| index)
+      .collect();
+    assert!(at.len() > 1, "{lane:?} starved");
+    for pair in at.windows(2) {
+      assert!(pair[1] - pair[0] - 1 <= f as usize + 2, "{lane:?}: {at:?}");
+    }
+  }
+}
+
+/// With `Elapsed`, a lane whose oldest item has waited longer than its wait is served at
+/// the next receive, over a lane of higher priority that is always full.
+#[cfg(feature = "test-util")]
+#[test]
+fn x3_o5_the_time_bounds_a_lanes_wait() {
+  use core::time::Duration;
+
+  use crate::{Elapsed, ManualClock};
+
+  let clock = ManualClock::new();
+  let policy = Elapsed::with_clock(Duration::from_millis(10), clock.clone());
+  let (tx, rx) = channel_with::<u32, Three, _>(three(4, false), policy).unwrap();
+  tx.try_send(Three::C, 99).unwrap();
+  tx.try_send(Three::A, 1).unwrap();
+  assert_eq!(
+    rx.try_recv().unwrap().unwrap().lane(),
+    Three::A,
+    "nothing is overdue: priority"
+  );
+  clock.advance(Duration::from_millis(11));
+  while tx.try_send(Three::A, 7).is_ok() {}
+  assert_eq!(rx.try_recv().unwrap().unwrap().lane(), Three::C, "overdue");
+}
+
+/// A receive asleep on every lane, dropped with a waker whose drop panics: it leaves every lane,
+/// so the next commit to any of them wakes the receive behind it.
+#[test]
+fn a_dropped_receive_leaves_every_lane_though_its_waker_panics() {
+  let (tx, rx) = channel_with::<u32, Three, _>(three(4, false), Strict).unwrap();
+  let faults = StdArc::new(Faults::default());
+  let faulty = faults.waker();
+  let mut first = rx.recv();
+  assert!(poll_with(&mut first, &faulty).is_pending());
+  let (probe, waker) = Probe::new();
+  let mut second = rx.recv();
+  assert!(poll_with(&mut second, &waker).is_pending());
+
+  faults.drop_panics.store(true, SeqCst);
+  let dropped = catch_unwind(AssertUnwindSafe(move || drop(first)));
+  faults.drop_panics.store(false, SeqCst);
+  assert!(dropped.is_err(), "the receive's stored wakers were dropped");
+  for lane in Three::ALL {
+    assert_eq!(
+      rx.snapshot().receivers_waiting(lane),
+      1,
+      "only the second receive waits on {lane:?}"
+    );
+  }
+  tx.try_send(Three::C, 7).unwrap();
+  assert!(
+    probe.take(),
+    "the commit woke the receive behind the dropped one"
+  );
+  assert!(matches!(poll_with(&mut second, &waker), Poll::Ready(Ok(_))));
+  drop(faulty);
+}
+
+/// Panics on `owed` while armed.
+struct PanicsWhileArmed(AtomicBool);
+
+impl Policy<Three> for PanicsWhileArmed {
+  type Stamp = ();
+
+  fn stamp(&self) {}
+
+  fn owed(&self, _: &LaneView<Three, ()>) -> Option<Three> {
+    if self.0.load(Ordering::SeqCst) {
+      panic!("a policy that panics");
+    }
+    None
+  }
+}
+
+/// A receive that is notified, spends its notifications, and then unwinds out of its take still
+/// wakes the receive behind it for the items it left.
+///
+/// The notifications land within one poll: the receive's take finds nothing, then it refreshes its
+/// waker, and the new waker's clone commits two items. The clone runs with no lock held.
+#[test]
+fn a_woken_receive_whose_take_unwinds_wakes_the_next() {
+  let policy = PanicsWhileArmed(AtomicBool::new(false));
+  let (tx, rx) = channel_with::<u32, Three, _>(three(4, false), policy).unwrap();
+  let (_, waker1) = Probe::new();
+  let (probe2, waker2) = Probe::new();
+  let mut first = rx.recv();
+  let mut second = rx.recv();
+  assert!(poll_with(&mut first, &waker1).is_pending());
+  assert!(poll_with(&mut second, &waker2).is_pending());
+
+  let faults = StdArc::new(Faults::default());
+  let sender = tx.clone();
+  *faults.on_clone.lock().unwrap() = Some(Box::new(move || {
+    sender.try_send(Three::B, 1).unwrap();
+    sender.try_send(Three::C, 2).unwrap();
+  }));
+  let faulty = faults.waker();
+  rx.policy().0.store(true, Ordering::SeqCst);
+  let unwound = catch_unwind(AssertUnwindSafe(|| poll_with(&mut first, &faulty)));
+  rx.policy().0.store(false, Ordering::SeqCst);
+  assert!(
+    unwound.is_err(),
+    "two lanes were in view, and the policy panicked"
+  );
+  assert!(
+    probe2.take(),
+    "the unwinding take woke the receive behind it"
+  );
+  assert!(matches!(
+    poll_with(&mut second, &waker2),
+    Poll::Ready(Ok(_))
+  ));
+}
+
+/// A receive of one item makes no policy call after its take: a policy that panics on its second
+/// call never costs the item its first call chose, and the panic of a later receive loses nothing.
+#[test]
+fn a_single_receive_asks_the_policy_once() {
+  let policy = PanicsOnSecond(AtomicUsize::new(0));
+  let (tx, rx) = channel_with::<u32, Three, _>(three(4, false), policy).unwrap();
+  for item in 0..2 {
+    tx.try_send(Three::B, item).unwrap();
+    tx.try_send(Three::C, 10 + item).unwrap();
+  }
+  let first = rx.try_recv().unwrap().expect("items are queued");
+  assert_eq!((first.lane(), first.into_item()), (Three::B, 0));
+  assert_eq!(
+    rx.policy().0.load(Ordering::SeqCst),
+    1,
+    "one call for one item"
+  );
+  let unwound = catch_unwind(AssertUnwindSafe(|| rx.try_recv()));
+  assert!(unwound.is_err(), "the second receive's call panicked");
+  let snapshot = tx.snapshot();
+  assert_eq!(
+    snapshot.queued(Three::B) + snapshot.queued(Three::C),
+    3,
+    "the panic took no item"
+  );
+}
+
+/// A lane whose positions are spent closes alone. The send that finds it so gets its item back,
+/// a later reserve of the lane resolves `Closed`, and the channel and its other lanes stay open.
+#[test]
+fn a_lane_closes_alone_at_its_last_position() {
+  use crate::ring::LAST;
+
+  let (tx, rx) = channel_with::<u32, Three, _>(three(1, false), Strict).unwrap();
+  tx.shared().lane_at(1).ring.skip_to(LAST);
+  tx.try_send(Three::B, 1).unwrap();
+  let (probe, waker) = Probe::new();
+  let mut waiting = tx.reserve(Three::B);
+  assert!(poll_with(&mut waiting, &waker).is_pending());
+  assert_eq!(rx.try_recv().unwrap().unwrap().ordinal(), LAST);
+  assert!(probe.take(), "the room went to the waiting reserve");
+  let Poll::Ready(Ok(permit)) = poll_with(&mut waiting, &waker) else {
+    panic!("the waiting reserve holds the room");
+  };
+  assert_eq!(
+    permit.send(2),
+    Err(SendError(2)),
+    "every position of B is spent"
+  );
+
+  let mut late = tx.reserve(Three::B);
+  assert!(matches!(
+    poll_with(&mut late, &waker),
+    Poll::Ready(Err(Closed))
+  ));
+  assert_eq!(tx.try_send(Three::B, 3), Err(TrySendError::Closed(3)));
+  assert!(!tx.is_closed(), "the channel stays open");
+  tx.try_send(Three::C, 4).unwrap();
+  assert_eq!(rx.try_recv().unwrap().unwrap().lane(), Three::C);
+  let mut batch = Vec::new();
+  assert_eq!(
+    rx.try_recv_many(&mut batch, Quota::up_to(1).lanes(Three::B..=Three::B)),
+    Err(RecvManyError::Ended),
+    "lane B is closed and empty"
+  );
+}
+
+/// A hand-written vocabulary of more lanes than a channel holds is refused by name, by both
+/// constructors of a channel of several lanes.
+#[test]
+fn more_lanes_than_a_channel_holds_are_refused() {
+  use crate::testing::Wide;
+
+  let options = || Options::<Wide<257>>::from_fn(|_| LaneOptions::new(cap(1)));
+  assert_eq!(
+    channel::<u32, Wide<257>>(options()).unwrap_err(),
+    Malformed::TooManyLanes
+  );
+  assert_eq!(
+    channel_with::<u32, Wide<257>, _>(options(), Strict).unwrap_err(),
+    Malformed::TooManyLanes
+  );
+}
+
+/// The most lanes a channel holds, built and used on a thread with a 256 KiB stack: a receive
+/// under the default policy with several lanes in view, a waiting reserve, and a snapshot, each
+/// keep their per-lane readings on that stack.
+#[test]
+fn the_most_lanes_fit_a_small_stack() {
+  use crate::testing::Wide;
+
+  std::thread::Builder::new()
+    .stack_size(256 * 1024)
+    .spawn(|| {
+      let options = Options::<Wide<256>>::from_fn(|_| LaneOptions::new(cap(1)));
+      let (tx, rx) = channel::<u32, Wide<256>>(options).unwrap();
+      tx.try_send(Wide(255), 1).unwrap();
+      tx.try_send(Wide(254), 2).unwrap();
+      tx.try_send(Wide(0), 3).unwrap();
+      let (probe, waker) = Probe::new();
+      let mut waiting = tx.reserve(Wide(0));
+      assert!(poll_with(&mut waiting, &waker).is_pending());
+      assert_eq!(tx.snapshot().senders_waiting(Wide(0)), 1);
+      let mut batch = Vec::new();
+      assert_eq!(rx.try_recv_many(&mut batch, 3), Ok(3));
+      assert!(
+        probe.take(),
+        "the room of lane 0 went to its waiting reserve"
+      );
+      assert!(matches!(
+        poll_with(&mut waiting, &waker),
+        Poll::Ready(Ok(_))
+      ));
+    })
+    .unwrap()
+    .join()
+    .unwrap();
+}
+
+/// A batch gives back the room of every item it took before it wakes a reserve granted one of
+/// them: a waker that sends, inline, into another lane the batch emptied finds its room.
+#[test]
+fn a_batch_gives_back_every_room_before_it_wakes() {
+  type Tx = Sender<u32, Three, Strict>;
+
+  /// Sends into lane B, inline, when woken.
+  struct SendsOnWake(std::sync::Mutex<Option<Tx>>);
+
+  impl std::task::Wake for SendsOnWake {
+    fn wake(self: StdArc<Self>) {
+      if let Some(tx) = self.0.lock().unwrap().take() {
+        tx.send_blocking(Three::B, 9).unwrap();
+      }
+    }
+  }
+
+  let (tx, rx) = channel_with::<u32, Three, _>(three(1, false), Strict).unwrap();
+  tx.try_send(Three::A, 1).unwrap();
+  tx.try_send(Three::B, 2).unwrap();
+  let sends = StdArc::new(SendsOnWake(std::sync::Mutex::new(Some(tx.clone()))));
+  let waker = std::task::Waker::from(sends.clone());
+  let mut waiting = tx.reserve(Three::A);
+  assert!(poll_with(&mut waiting, &waker).is_pending());
+
+  let mut batch = Vec::new();
+  assert_eq!(rx.try_recv_many(&mut batch, 2), Ok(2));
+  assert!(sends.0.lock().unwrap().is_none(), "the waker ran");
+  assert_eq!(
+    tx.snapshot().queued(Three::B),
+    1,
+    "the waker's send found B's room"
+  );
+  assert!(matches!(
+    poll_with(&mut waiting, &waker),
+    Poll::Ready(Ok(_))
+  ));
+}
+
+/// A receive whose registration a waker's clone interrupted leaves the lines it had joined, and,
+/// polled again, joins every line before it waits: the next commit to any lane it admits wakes it.
+#[test]
+fn an_interrupted_registration_is_made_again() {
+  let (tx, rx) = channel_with::<u32, Three, _>(three(1, false), Strict).unwrap();
+  let faults = StdArc::new(Faults::default());
+  let arm = faults.clone();
+  *faults.on_clone.lock().unwrap() = Some(Box::new(move || {
+    arm.clone_panics.store(true, SeqCst);
+  }));
+  let faulty = faults.waker();
+  let mut recv = rx.recv();
+  let interrupted = catch_unwind(AssertUnwindSafe(|| poll_with(&mut recv, &faulty)));
+  faults.clone_panics.store(false, SeqCst);
+  assert!(interrupted.is_err(), "the second lane's clone panicked");
+  for lane in Three::ALL {
+    assert_eq!(
+      rx.snapshot().receivers_waiting(lane),
+      0,
+      "the unwind left {lane:?}'s line"
+    );
+  }
+
+  let (probe, waker) = Probe::new();
+  assert!(poll_with(&mut recv, &waker).is_pending());
+  for lane in Three::ALL {
+    assert_eq!(
+      rx.snapshot().receivers_waiting(lane),
+      1,
+      "in {lane:?}'s line"
+    );
+  }
+  tx.try_send(Three::C, 5).unwrap();
+  assert!(probe.take(), "the commit to lane C woke the receive");
+  assert!(matches!(poll_with(&mut recv, &waker), Poll::Ready(Ok(_))));
+}
+
+/// A policy with a zero-sized stamp that owes lane B wherever the view shows B's oldest stamp.
+#[derive(Debug, Clone, Copy, Default)]
+struct Peeks;
+
+impl Policy<Three> for Peeks {
+  type Stamp = ();
+
+  fn stamp(&self) {}
+
+  fn owed(&self, view: &LaneView<Three, ()>) -> Option<Three> {
+    view.oldest(Three::B).map(|()| Three::B)
+  }
+}
+
+/// A policy with a stamp of eight bytes that never owes.
+#[derive(Debug, Clone, Copy, Default)]
+struct Abstains;
+
+impl Policy<Three> for Abstains {
+  type Stamp = u64;
+
+  fn stamp(&self) -> u64 {
+    0
+  }
+
+  fn owed(&self, _: &LaneView<Three, u64>) -> Option<Three> {
+    None
+  }
+}
+
+/// The lane a fresh channel of `policy`, with an item in lanes A and B, serves first.
+fn first_served<Y: Policy<Three>>(policy: Y) -> Three {
+  let (tx, rx) = channel_with::<u32, Three, Y>(three(1, false), policy).unwrap();
+  tx.try_send(Three::A, 1).unwrap();
+  tx.try_send(Three::B, 2).unwrap();
+  rx.try_recv().unwrap().unwrap().lane()
+}
+
+/// A zero-sized stamp is as visible to its policy asked directly as through a projection of a
+/// larger stamp: a lane that holds an item shows its oldest stamp either way.
+#[test]
+fn a_zero_sized_stamp_reads_the_same_directly_and_through_first_of() {
+  assert_eq!(first_served(Peeks), Three::B, "B's oldest stamp is shown");
+  assert_eq!(first_served(FirstOf::new(Peeks, Abstains)), Three::B);
+  assert_eq!(first_served(FirstOf::new(Abstains, Peeks)), Three::B);
+}
+
+/// `Either::Left(P)` chooses as `P` does.
+#[cfg(feature = "either")]
+#[test]
+fn either_left_chooses_as_its_policy_does() {
+  use either::Either;
+
+  assert_eq!(
+    first_served(Either::<Peeks, Peeks>::Left(Peeks)),
+    first_served(Peeks)
+  );
+  assert_eq!(
+    first_served(Either::<Strict, Peeks>::Left(Strict)),
+    first_served(Strict)
+  );
+  assert_eq!(
+    first_served(Either::<Abstains, Peeks>::Right(Peeks)),
+    first_served(Peeks)
+  );
+}
+
+/// A waker that, the first time it is woken, waits until the gate is opened: a producer's waker
+/// that blocks for a while, short of blocking on the channel.
+struct Gate {
+  woken: AtomicBool,
+  open: AtomicBool,
+}
+
+impl std::task::Wake for Gate {
+  fn wake(self: StdArc<Self>) {
+    self.wake_by_ref();
+  }
+
+  fn wake_by_ref(self: &StdArc<Self>) {
+    if !self.woken.swap(true, Ordering::SeqCst) {
+      while !self.open.load(Ordering::SeqCst) {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+      }
+    }
+  }
+}
+
+/// A receive wakes the reserve its take granted only after it has left its lines and chained: a
+/// granted waker that blocks for a while leaves no other receiver asleep beside an item.
+///
+/// Receive R of every lane holds B's notice, and T, of A alone, holds A's. R takes A's item, by
+/// priority, so it spends B's notice on A: only the chain can wake U, of B alone, for B's item.
+/// R's take grants A's room to a reserve whose waker blocks until the gate opens, and U must be
+/// woken while it is still shut. On real threads, under a timeout.
+#[cfg_attr(miri, ignore = "real threads and a timeout")]
+#[test]
+fn a_granted_waker_that_blocks_holds_back_no_chain() {
+  use std::time::{Duration, Instant};
+
+  let (tx, rx) = channel_with::<u32, Three, _>(three(1, false), Strict).unwrap();
+  let (r_probe, r_waker) = Probe::new();
+  let (t_probe, t_waker) = Probe::new();
+  let (u_probe, u_waker) = Probe::new();
+  let (mut t_batch, mut u_batch) = (Vec::new(), Vec::new());
+  let mut r = rx.recv();
+  let mut t = rx.recv_many(&mut t_batch, Quota::up_to(1).lanes(Three::A..=Three::A));
+  let mut u = rx.recv_many(&mut u_batch, only_b());
+  assert!(poll_with(&mut r, &r_waker).is_pending());
+  assert!(poll_with(&mut t, &t_waker).is_pending());
+  assert!(poll_with(&mut u, &u_waker).is_pending());
+  // B's commit notifies R, the oldest in B's line; A's notifies T, R holding a notice already.
+  tx.try_send(Three::B, 1).unwrap();
+  tx.try_send(Three::A, 2).unwrap();
+  assert!(r_probe.take() && t_probe.take(), "one notice each");
+  assert!(!u_probe.take());
+  // Lane A is full: the reserve waits for its room.
+  let gate = StdArc::new(Gate {
+    woken: AtomicBool::new(false),
+    open: AtomicBool::new(false),
+  });
+  let gated = core::task::Waker::from(gate.clone());
+  let mut reserve = tx.reserve(Three::A);
+  assert!(poll_with(&mut reserve, &gated).is_pending());
+
+  let woken = std::thread::scope(|scope| {
+    let taker = scope.spawn(|| poll_with(&mut r, &r_waker));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut woken = false;
+    while !woken && Instant::now() < deadline {
+      woken = u_probe.take();
+      std::thread::sleep(Duration::from_millis(1));
+    }
+    let shut = !gate.open.load(Ordering::SeqCst);
+    gate.open.store(true, Ordering::SeqCst);
+    assert!(matches!(taker.join().unwrap(), Poll::Ready(Ok(_))));
+    woken && shut
+  });
+  assert!(
+    woken,
+    "the chain woke U while the granted waker was blocked"
+  );
+  assert!(gate.woken.load(Ordering::SeqCst), "the reserve was granted");
+  assert!(matches!(poll_with(&mut u, &u_waker), Poll::Ready(Ok(_))));
+  assert!(matches!(
+    poll_with(&mut reserve, &gated),
+    Poll::Ready(Ok(_))
+  ));
+  drop(t);
+}
+
+/// A receive of lane B alone: a batch of one, limited to B.
+fn only_b() -> Quota<Three> {
+  Quota::up_to(1).lanes(Three::B..=Three::B)
+}
+
+/// A notice belongs to a receive, not to a lane's place: a receive of lanes A and B notified by
+/// a commit to A is passed over by the commit to B, which wakes the receive of B alone.
+#[test]
+fn a_notified_receive_is_passed_over_on_its_other_lanes() {
+  let (tx, rx) = channel_with::<u32, Three, _>(three(1, false), Strict).unwrap();
+  let (first_probe, first_waker) = Probe::new();
+  let (second_probe, second_waker) = Probe::new();
+  let mut first = rx.recv();
+  let mut batch = Vec::new();
+  let mut second = rx.recv_many(&mut batch, only_b());
+  assert!(poll_with(&mut first, &first_waker).is_pending());
+  assert!(poll_with(&mut second, &second_waker).is_pending());
+  tx.try_send(Three::A, 1).unwrap();
+  assert!(first_probe.take());
+  // The first receive's task is busy elsewhere, and does not poll it yet.
+  tx.try_send(Three::B, 2).unwrap();
+  assert!(!first_probe.take(), "no receive holds two notices");
+  assert!(
+    second_probe.take(),
+    "the commit to B wakes the receive of B alone"
+  );
+}
+
+/// A woken receive polled promptly leaves the rest to the chain. A receive of every lane holds
+/// B's notice when A's commit finds no other receive in A's line, so that notice is dropped: the
+/// receive of B alone waits. The first receive, polled promptly as the contract asks, takes A's
+/// item, by priority, and its chain wakes the receive of B alone for B's.
+#[test]
+fn a_woken_receive_polled_promptly_leaves_the_rest_to_the_chain() {
+  let (tx, rx) = channel_with::<u32, Three, _>(three(1, false), Strict).unwrap();
+  let (first_probe, first_waker) = Probe::new();
+  let (second_probe, second_waker) = Probe::new();
+  let mut first = rx.recv();
+  let mut batch = Vec::new();
+  let mut second = rx.recv_many(&mut batch, only_b());
+  assert!(poll_with(&mut first, &first_waker).is_pending());
+  assert!(poll_with(&mut second, &second_waker).is_pending());
+  tx.try_send(Three::B, 1).unwrap();
+  tx.try_send(Three::A, 2).unwrap();
+  assert!(first_probe.take(), "the oldest receive of B");
+  let Poll::Ready(Ok(received)) = poll_with(&mut first, &first_waker) else {
+    panic!("the woken receive takes an item");
+  };
+  assert_eq!(received.lane(), Three::A, "by priority");
+  assert!(second_probe.take(), "the chain woke the receive of B alone");
+  assert!(matches!(
+    poll_with(&mut second, &second_waker),
+    Poll::Ready(Ok(_))
+  ));
+}
+
+/// Woken receives polled promptly serve every item, each chain waking the next. Receives of
+/// {A, B}, {B, C} and {C}; commits to B and C notify the first two, and A's commit, whose only
+/// receive holds a notice already, is dropped. Polled in turn, the first takes A's item and the
+/// second B's, and the second's chain wakes the third for C's.
+#[test]
+fn woken_receives_polled_promptly_serve_every_item() {
+  let (tx, rx) = channel_with::<u32, Three, _>(three(1, false), Strict).unwrap();
+  let probes: Vec<_> = (0..3).map(|_| Probe::new()).collect();
+  let (mut ab, mut bc, mut c) = (Vec::new(), Vec::new(), Vec::new());
+  let mut first = rx.recv_many(&mut ab, Quota::up_to(1).lanes(Three::A..=Three::B));
+  let mut second = rx.recv_many(&mut bc, Quota::up_to(1).lanes(Three::B..=Three::C));
+  let mut third = rx.recv_many(&mut c, Quota::up_to(1).lanes(Three::C..=Three::C));
+  assert!(poll_with(&mut first, &probes[0].1).is_pending());
+  assert!(poll_with(&mut second, &probes[1].1).is_pending());
+  assert!(poll_with(&mut third, &probes[2].1).is_pending());
+  tx.try_send(Three::B, 1).unwrap();
+  tx.try_send(Three::C, 2).unwrap();
+  tx.try_send(Three::A, 3).unwrap();
+  assert!(probes[0].0.take() && probes[1].0.take(), "one notice each");
+  assert!(matches!(
+    poll_with(&mut first, &probes[0].1),
+    Poll::Ready(Ok(_))
+  ));
+  assert!(matches!(
+    poll_with(&mut second, &probes[1].1),
+    Poll::Ready(Ok(_))
+  ));
+  assert!(probes[2].0.take(), "the second's chain woke the third");
+  assert!(matches!(
+    poll_with(&mut third, &probes[2].1),
+    Poll::Ready(Ok(_))
+  ));
+  drop((first, second, third));
+  assert_eq!(
+    (ab.len(), bc.len(), c.len()),
+    (1, 1, 1),
+    "every item served"
+  );
+  let lanes = [ab[0].lane(), bc[0].lane(), c[0].lane()];
+  assert_eq!(lanes, [Three::A, Three::B, Three::C]);
+}
