@@ -222,8 +222,8 @@ fn a_broadcast_needs_no_memory_and_dispatch_wakes_every_chunk() {
   let mut wakes = Wakes::new();
   dispatch(&line, &mut wakes);
   wakes.finish();
-  for task in 0..count {
-    assert_eq!(tasks.0[task].0.load(SeqCst), 1, "task {task} is woken once");
+  for (task, woken) in tasks.0.iter().enumerate() {
+    assert_eq!(woken.0.load(SeqCst), 1, "task {task} is woken once");
   }
   let mut line = lock(&line);
   for key in keys {
