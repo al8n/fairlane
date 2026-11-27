@@ -12,7 +12,7 @@ use hybrid_array::Array;
 
 use crate::{
   arrivals::Arrivals,
-  choice::Choice,
+  choice::{Choice, table},
   lane::{Lane, PerLane, Single, index_of, lane_at, lane_count},
   options::{LaneOptions, Malformed, Options},
   policy::{DefaultPolicy, Policy},
@@ -194,7 +194,12 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     {
       return Err(Malformed::Capacity(index));
     }
-    let mut states = Vec::with_capacity(count);
+    // Each table is reserved fallibly, and filled within what was reserved, so that boxing it
+    // reuses the allocation. A table that spans every lane is refused as lane 0's.
+    let mut states = Vec::new();
+    states
+      .try_reserve_exact(count)
+      .map_err(|_| Malformed::Capacity(0))?;
     for index in 0..count {
       states.push(LaneState {
         ring: Ring::new(capacity(index), stamped(index)).ok_or(Malformed::Capacity(index))?,
@@ -206,11 +211,17 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
         taken: AtomicU64::new(0),
       });
     }
+    let names = table(count, lane_at::<L>).ok_or(Malformed::Capacity(0))?;
+    let choice = if lanes {
+      Some(Mutex::new(Choice::new().ok_or(Malformed::Capacity(0))?))
+    } else {
+      None
+    };
     let shared = Self {
       lanes: states.into_boxed_slice(),
-      names: (0..count).map(lane_at::<L>).collect(),
+      names,
       express,
-      choice: lanes.then(|| Mutex::new(Choice::new())),
+      choice,
       policy,
       senders: AtomicUsize::new(1),
       receivers: AtomicUsize::new(1),

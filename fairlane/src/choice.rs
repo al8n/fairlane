@@ -66,12 +66,23 @@ pub(crate) struct Choice<T, L: Lane, S> {
 }
 
 impl<T, L: Lane, S> Choice<T, L, S> {
-  pub(crate) fn new() -> Self {
-    Self {
+  /// `None` where the lookahead's memory cannot be allocated.
+  pub(crate) fn new() -> Option<Self> {
+    Some(Self {
       passed_over: PerLane::filled(0),
-      ahead: (0..lane_count::<L>()).map(|_| None).collect(),
-    }
+      ahead: table(lane_count::<L>(), |_| None)?,
+    })
   }
+}
+
+/// A table of `count` entries, `fill` giving each by index: reserved fallibly, then filled within
+/// what was reserved, so that boxing it reuses the allocation. `None` where the memory cannot be
+/// allocated.
+pub(crate) fn table<E>(count: usize, fill: impl FnMut(usize) -> E) -> Option<Box<[E]>> {
+  let mut entries = Vec::new();
+  entries.try_reserve_exact(count).ok()?;
+  entries.extend((0..count).map(fill));
+  Some(entries.into_boxed_slice())
 }
 
 #[cfg(test)]

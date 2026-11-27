@@ -159,6 +159,9 @@ pub enum Malformed {
   ExpressBehind(usize),
   /// This lane's capacity cannot be held as a ring: a capacity that cannot be laid out, or that
   /// cannot be allocated. Nothing is shared yet, so the refusal changes nothing.
+  ///
+  /// A table the channel keeps for every lane, of the lanes' states, their names or the
+  /// lookahead, that cannot be allocated is refused as lane 0's.
   Capacity(usize),
 }
 
