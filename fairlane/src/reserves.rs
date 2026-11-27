@@ -245,15 +245,20 @@ impl Reserves {
   }
 
   /// Closes the lane's room: `CLOSED` set, every grant not taken up settled back, and every
-  /// reserve in line closed. Their wakers go onto `wakers`, to be woken once every state change
-  /// of the close is done. A second close does nothing.
-  pub(crate) fn close(&self, remaining: &Remaining, wakers: &mut Vec<Waker>) {
+  /// reserve in line closed, its wake owed, for [`dispatch`](Self::dispatch) once every state
+  /// change of the close is done. A second close changes nothing.
+  pub(crate) fn close(&self, remaining: &Remaining) {
     let mut line = lock(&self.line);
     if remaining.load() & CLOSED != 0 {
       return;
     }
-    let granted = line.close_all(wakers);
+    let granted = line.close_all();
     remaining.update(|current| closed(current, granted));
+  }
+
+  /// Wakes the reserves a close left owed, a chunk at a time, each chunk after the lock.
+  pub(crate) fn dispatch(&self, wakes: &mut Wakes) {
+    waiters::dispatch(&self.line, wakes);
   }
 }
 

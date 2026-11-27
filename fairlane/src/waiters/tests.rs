@@ -50,6 +50,23 @@ impl Tasks {
       .expect("the waker belongs to one of the tasks")
   }
 
+  /// The tasks a broadcast left owed, in order, every owed waker taken out.
+  fn owed(&self, waiters: &mut Waiters) -> Vec<usize> {
+    let mut owed = Vec::new();
+    loop {
+      let mut chunk: [Option<Waker>; 2] = [None, None];
+      let taken = waiters.take_owed(&mut chunk);
+      owed.extend(
+        chunk[..taken]
+          .iter()
+          .map(|waker| self.which(waker.as_ref().expect("an owed place holds its waker"))),
+      );
+      if taken < chunk.len() {
+        return owed;
+      }
+    }
+  }
+
   /// The task of the oldest waiter in line, which `notify_oldest` notifies.
   fn notify(&self, waiters: &mut Waiters) -> usize {
     let woken = waiters
@@ -142,10 +159,12 @@ fn close_all_closes_every_waiter_and_counts_the_notified() {
     .map(|task| insert(&mut waiters, tasks.waker(task)))
     .collect();
   let _ = waiters.notify_oldest();
-  let mut woken = Vec::new();
-  assert_eq!(waiters.close_all(&mut woken), 1, "one grant to settle");
-  let woken: Vec<usize> = woken.iter().map(|waker| tasks.which(waker)).collect();
-  assert_eq!(woken, [1, 2, 3], "the waiters still in line are woken");
+  assert_eq!(waiters.close_all(), 1, "one grant to settle");
+  assert_eq!(
+    tasks.owed(&mut waiters),
+    [1, 2, 3],
+    "the waiters still in line are owed a wake"
+  );
   assert_eq!((waiters.queued(), waiters.notified()), (0, 0));
   assert!(waiters.notify_oldest().is_none());
   for key in keys {
@@ -160,11 +179,9 @@ fn notify_all_notifies_the_line_in_order() {
   let keys: Vec<Key> = (0..3)
     .map(|task| insert(&mut waiters, tasks.waker(task)))
     .collect();
-  let mut woken = Vec::new();
-  waiters.notify_all(&mut woken);
-  let woken: Vec<usize> = woken.iter().map(|waker| tasks.which(waker)).collect();
-  assert_eq!(woken, [0, 1, 2]);
+  waiters.notify_all();
   assert_eq!((waiters.queued(), waiters.notified()), (0, 3));
+  assert_eq!(tasks.owed(&mut waiters), [0, 1, 2]);
   for key in keys {
     assert_eq!(waiters.state(&key), State::Notified);
     let _ = waiters.remove(key);
@@ -185,4 +202,52 @@ fn a_stored_waker_is_replaced_and_handed_back() {
   let (state, stored) = waiters.remove(key);
   assert_eq!(state, State::Queued);
   assert_eq!(tasks.which(&stored.unwrap()), 1);
+}
+
+#[test]
+fn a_broadcast_needs_no_memory_and_dispatch_wakes_every_chunk() {
+  let count = 2 * CHUNK + 3;
+  let tasks = Tasks::new(count);
+  let line = Mutex::new(Waiters::new());
+  let keys: Vec<Key> = (0..count)
+    .map(|task| insert(&mut lock(&line), tasks.waker(task)))
+    .collect();
+  let capacity = lock(&line).slots.capacity();
+  lock(&line).close_all();
+  assert_eq!(
+    lock(&line).slots.capacity(),
+    capacity,
+    "a close allocates nothing"
+  );
+  let mut wakes = Wakes::new();
+  dispatch(&line, &mut wakes);
+  wakes.finish();
+  for task in 0..count {
+    assert_eq!(tasks.0[task].0.load(SeqCst), 1, "task {task} is woken once");
+  }
+  let mut line = lock(&line);
+  for key in keys {
+    assert!(matches!(line.remove(key), (State::Closed, None)));
+  }
+}
+
+#[test]
+fn a_waiter_that_leaves_before_its_owed_wake_takes_its_waker_and_the_rest_stay_owed() {
+  let tasks = Tasks::new(3);
+  let mut waiters = Waiters::new();
+  let mut keys: Vec<Key> = (0..3)
+    .map(|task| insert(&mut waiters, tasks.waker(task)))
+    .collect();
+  waiters.notify_all();
+  let (state, waker) = waiters.remove(keys.remove(1));
+  assert_eq!(state, State::Notified);
+  assert_eq!(tasks.which(&waker.expect("its own waker comes back")), 1);
+  assert_eq!(waiters.notified(), 2);
+  assert_eq!(tasks.owed(&mut waiters), [0, 2]);
+  // A close after the broadcast settles the grants without owing a second wake.
+  assert_eq!(waiters.close_all(), 2);
+  assert!(tasks.owed(&mut waiters).is_empty());
+  for key in keys {
+    assert!(matches!(waiters.remove(key), (State::Closed, None)));
+  }
 }

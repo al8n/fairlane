@@ -97,15 +97,6 @@ pub(crate) fn wake(waker: Option<Waker>) {
   }
 }
 
-/// Wakes every waker of `wakers`, as [`Wakes`] does.
-pub(crate) fn wake_all(wakers: Vec<Waker>) {
-  let mut wakes = Wakes::new();
-  for waker in wakers {
-    wakes.wake(Some(waker));
-  }
-  wakes.finish();
-}
-
 /// How many wakers [`Staged`] keeps without allocating: a single receive needs one, and a batch of
 /// up to this many items allocates nothing for the reserves it grants room to.
 const STAGED_INLINE: usize = 8;

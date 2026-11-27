@@ -125,10 +125,15 @@ impl Arrivals {
     }
   }
 
-  /// Notifies every waiting receiver, at a close. Their wakers go onto `wakers`, to be woken once
-  /// every state change of the close is done.
-  pub(crate) fn close(&self, wakers: &mut Vec<Waker>) {
-    lock(&self.line).notify_all(wakers);
+  /// Notifies every waiting receiver, at a close, each wake owed, for
+  /// [`dispatch`](Self::dispatch) once every state change of the close is done.
+  pub(crate) fn close(&self) {
+    lock(&self.line).notify_all();
+  }
+
+  /// Wakes the receivers a close left owed, a chunk at a time, each chunk after the lock.
+  pub(crate) fn dispatch(&self, wakes: &mut Wakes) {
+    waiters::dispatch(&self.line, wakes);
   }
 
   /// Receivers counted as waiting.

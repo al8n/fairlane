@@ -3,18 +3,29 @@
 //! - **Each waiter has a place,** named by a [`Key`] its one future holds, and a [`State`] that only
 //!   the holder of the owner's lock changes. A waiter learns what happened to it by reading its own
 //!   state, so a wake carries nothing.
-//! - **Its waker is stored with it,** and taken out when the waiter is notified or closed, to be
-//!   woken after the lock is let go. Nothing here clones, wakes or drops a waker: the caller does,
-//!   outside the lock.
+//! - **Its waker is stored with it.** A notice to one waiter takes the waker out, for the caller to
+//!   wake after the lock. A broadcast changes every waiter's state and leaves each waker in its
+//!   place, on the owed list; [`dispatch`] then wakes them a fixed number at a time, each chunk
+//!   after the lock. So a broadcast needs no memory beyond the places themselves. Nothing here
+//!   clones, wakes or drops a waker under the lock.
 //! - **The places live in one vector,** reused. The queued ones form a list through it, oldest
-//!   first, so a waiter that leaves from the middle of the line leaves at once. The vector keeps
-//!   the most places ever taken at once: as many as there were waiters at one time.
+//!   first, and the owed ones another, so a waiter that leaves leaves its list at once. The vector
+//!   keeps the most places ever taken at once: as many as there were waiters at one time. It grows
+//!   only through [`Waiters::make_room`], before its owner changes any state.
 
 use core::task::Waker;
 use std::collections::TryReserveError;
 
+use crate::{
+  sync::{Mutex, lock},
+  wake::Wakes,
+};
+
 /// No place.
 const NIL: usize = usize::MAX;
+
+/// How many owed wakers [`dispatch`] takes out under the lock at a time.
+const CHUNK: usize = 32;
 
 /// Where a waiter is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,9 +50,11 @@ pub(crate) struct Key {
 
 struct Entry {
   state: State,
-  /// `Some` while queued.
+  /// `Some` while queued, and while a broadcast's wake is owed.
   waker: Option<Waker>,
-  /// The neighbours in line, while queued.
+  /// Whether it is on the owed list: a broadcast changed its state and left its waker here.
+  owed: bool,
+  /// The neighbours in its list: the line while queued, the owed list while owed.
   prev: usize,
   next: usize,
 }
@@ -52,13 +65,35 @@ enum Slot {
   Taken(Entry),
 }
 
+/// The ends of a list through the places.
+#[derive(Clone, Copy)]
+struct List {
+  head: usize,
+  tail: usize,
+}
+
+impl List {
+  const EMPTY: Self = Self {
+    head: NIL,
+    tail: NIL,
+  };
+}
+
+/// Which list a place is on.
+#[derive(Clone, Copy)]
+enum Which {
+  Line,
+  Owed,
+}
+
 pub(crate) struct Waiters {
   slots: Vec<Slot>,
   /// The first free place.
   vacant: usize,
-  /// The oldest and the newest queued places.
-  head: usize,
-  tail: usize,
+  /// The queued places, oldest first.
+  line: List,
+  /// The places a broadcast left a waker in, to be woken.
+  owed: List,
   queued: usize,
   notified: usize,
   #[cfg(debug_assertions)]
@@ -70,8 +105,8 @@ impl Waiters {
     Self {
       slots: Vec::new(),
       vacant: NIL,
-      head: NIL,
-      tail: NIL,
+      line: List::EMPTY,
+      owed: List::EMPTY,
       queued: 0,
       notified: 0,
       #[cfg(debug_assertions)]
@@ -113,7 +148,8 @@ impl Waiters {
     let entry = Entry {
       state: State::Queued,
       waker: Some(waker),
-      prev: self.tail,
+      owed: false,
+      prev: NIL,
       next: NIL,
     };
     let index = if self.vacant == NIL {
@@ -128,11 +164,7 @@ impl Waiters {
       self.slots[index] = Slot::Taken(entry);
       index
     };
-    match self.tail {
-      NIL => self.head = index,
-      tail => self.entry_at_mut(tail).next = index,
-    }
-    self.tail = index;
+    self.link_back(Which::Line, index);
     self.queued += 1;
     Key {
       index,
@@ -169,51 +201,94 @@ impl Waiters {
   /// Notifies the oldest waiter in line: out of the line, `Notified`, and its waker taken out to be
   /// woken. `None` where nobody is in line.
   pub(crate) fn notify_oldest(&mut self) -> Option<Option<Waker>> {
-    let index = self.head;
+    let index = self.line.head;
     if index == NIL {
       return None;
     }
-    self.unlink(index);
+    self.unlink(Which::Line, index);
+    self.queued -= 1;
     self.notified += 1;
     let entry = self.entry_at_mut(index);
     entry.state = State::Notified;
     Some(entry.waker.take())
   }
 
-  /// Notifies every waiter in line, oldest first, pushing their wakers onto `wakers`.
-  pub(crate) fn notify_all(&mut self, wakers: &mut Vec<Waker>) {
-    while let Some(waker) = self.notify_oldest() {
-      wakers.extend(waker);
-    }
+  /// Notifies every waiter in line, and leaves each waker owed, for [`dispatch`] to wake.
+  pub(crate) fn notify_all(&mut self) {
+    self.notified += self.queued;
+    self.broadcast(State::Notified);
   }
 
-  /// Closes every waiter, queued or notified, pushing the wakers of those in line onto `wakers`.
-  /// Answers how many had been notified: for a reserve line, the grants not taken up.
-  pub(crate) fn close_all(&mut self, wakers: &mut Vec<Waker>) -> usize {
+  /// Closes every waiter, queued or notified, and leaves the wakers of those in line owed, for
+  /// [`dispatch`] to wake. Answers how many had been notified: for a reserve line, the grants not
+  /// taken up.
+  pub(crate) fn close_all(&mut self) -> usize {
     let notified = self.notified;
     for slot in &mut self.slots {
       if let Slot::Taken(entry) = slot {
-        if entry.state != State::Closed {
+        if entry.state == State::Notified {
           entry.state = State::Closed;
-          wakers.extend(entry.waker.take());
         }
       }
     }
-    self.head = NIL;
-    self.tail = NIL;
-    self.queued = 0;
     self.notified = 0;
+    self.broadcast(State::Closed);
     notified
   }
 
+  /// Moves every waiter in line to `state` and onto the owed list, its waker left in place.
+  fn broadcast(&mut self, state: State) {
+    let mut at = self.line.head;
+    while at != NIL {
+      let entry = self.entry_at_mut(at);
+      entry.state = state;
+      entry.owed = true;
+      at = entry.next;
+    }
+    let line = core::mem::replace(&mut self.line, List::EMPTY);
+    if line.head != NIL {
+      match self.owed.tail {
+        NIL => self.owed.head = line.head,
+        tail => {
+          self.entry_at_mut(tail).next = line.head;
+          self.entry_at_mut(line.head).prev = tail;
+        }
+      }
+      self.owed.tail = line.tail;
+    }
+    self.queued = 0;
+  }
+
+  /// Takes the wakers of up to `out.len()` owed places into `out`, and answers how many.
+  pub(crate) fn take_owed(&mut self, out: &mut [Option<Waker>]) -> usize {
+    let mut taken = 0;
+    while taken < out.len() && self.owed.head != NIL {
+      let index = self.owed.head;
+      self.unlink(Which::Owed, index);
+      let entry = self.entry_at_mut(index);
+      entry.owed = false;
+      out[taken] = entry.waker.take();
+      taken += 1;
+    }
+    taken
+  }
+
   /// Frees the place of `key`, whatever its state, and answers the state it had and the waker it
-  /// still held, for the caller to drop after the lock.
+  /// still held, for the caller to drop after the lock. An owed waker is the holder's own, polled
+  /// before the broadcast's wake reached it: it needs no wake.
   pub(crate) fn remove(&mut self, key: Key) -> (State, Option<Waker>) {
-    let state = self.entry(&key).state;
-    match state {
-      State::Queued => self.unlink(key.index),
-      State::Notified => self.notified -= 1,
-      State::Closed => {}
+    let (state, owed) = {
+      let entry = self.entry(&key);
+      (entry.state, entry.owed)
+    };
+    if owed {
+      self.unlink(Which::Owed, key.index);
+    } else if state == State::Queued {
+      self.unlink(Which::Line, key.index);
+      self.queued -= 1;
+    }
+    if state == State::Notified {
+      self.notified -= 1;
     }
     let slot = core::mem::replace(&mut self.slots[key.index], Slot::Vacant(self.vacant));
     self.vacant = key.index;
@@ -223,24 +298,45 @@ impl Waiters {
     }
   }
 
-  /// Takes the queued place at `index` out of the line.
-  fn unlink(&mut self, index: usize) {
+  fn list(&mut self, which: Which) -> &mut List {
+    match which {
+      Which::Line => &mut self.line,
+      Which::Owed => &mut self.owed,
+    }
+  }
+
+  /// Puts the place at `index` at the back of a list.
+  fn link_back(&mut self, which: Which, index: usize) {
+    let tail = self.list(which).tail;
+    {
+      let entry = self.entry_at_mut(index);
+      entry.prev = tail;
+      entry.next = NIL;
+    }
+    match tail {
+      NIL => self.list(which).head = index,
+      tail => self.entry_at_mut(tail).next = index,
+    }
+    self.list(which).tail = index;
+  }
+
+  /// Takes the place at `index` out of a list.
+  fn unlink(&mut self, which: Which, index: usize) {
     let (prev, next) = {
       let entry = self.entry_at(index);
       (entry.prev, entry.next)
     };
     match prev {
-      NIL => self.head = next,
+      NIL => self.list(which).head = next,
       prev => self.entry_at_mut(prev).next = next,
     }
     match next {
-      NIL => self.tail = prev,
+      NIL => self.list(which).tail = prev,
       next => self.entry_at_mut(next).prev = prev,
     }
     let entry = self.entry_at_mut(index);
     entry.prev = NIL;
     entry.next = NIL;
-    self.queued -= 1;
   }
 
   #[inline]
@@ -270,6 +366,22 @@ impl Waiters {
     match &mut self.slots[index] {
       Slot::Taken(entry) => entry,
       Slot::Vacant(_) => unreachable!("a key names a taken place"),
+    }
+  }
+}
+
+/// Wakes every waker a broadcast left owed in `line`, [`CHUNK`] at a time: each chunk is taken out
+/// under the lock into a buffer on the stack, and woken after it. It needs no memory, so it cannot
+/// fail between the broadcast's state changes and their wakes.
+pub(crate) fn dispatch(line: &Mutex<Waiters>, wakes: &mut Wakes) {
+  loop {
+    let mut chunk: [Option<Waker>; CHUNK] = [const { None }; CHUNK];
+    let taken = lock(line).take_owed(&mut chunk);
+    for waker in &mut chunk[..taken] {
+      wakes.wake(waker.take());
+    }
+    if taken < CHUNK {
+      return;
     }
   }
 }

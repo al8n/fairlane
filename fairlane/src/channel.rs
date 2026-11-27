@@ -25,7 +25,7 @@ use crate::{
   snapshot::{Reading, Snapshot},
   sync::{Arc, AtomicBool, AtomicU64, AtomicUsize, Mutex, Ordering, lock},
   waiters::{self, Key, State, Waiters},
-  wake::{Wakes, dispose, wake, wake_all},
+  wake::{Wakes, dispose, wake},
 };
 
 /// A channel of several lanes, with the default policy: a count and a time, whichever comes first
@@ -302,11 +302,13 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   /// wait on the thread that spent its last position.
   fn close_lane(&self, index: usize) {
     let state = self.lane_at(index);
-    let mut wakers = Vec::new();
-    state.reserves.close(&state.remaining, &mut wakers);
+    state.reserves.close(&state.remaining);
     state.ring.close();
-    state.arrivals.close(&mut wakers);
-    wake_all(wakers);
+    state.arrivals.close();
+    let mut wakes = Wakes::new();
+    state.reserves.dispatch(&mut wakes);
+    state.arrivals.dispatch(&mut wakes);
+    wakes.finish();
   }
 
   /// Closes every lane, in index order: its room first, so that no reserve is granted, then its
@@ -316,31 +318,43 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   ///
   /// Everything a close wakes, its reserves, its receivers and its `closed()` futures, is woken
   /// once every state change of the close is done: a waker is user code, and one that panics
-  /// leaves no lane open.
+  /// leaves no lane open. The wakes are delivered from the waiters' own places, a chunk at a time,
+  /// so nothing is allocated after the first state change.
   pub(crate) fn close(&self) -> bool {
-    let mut wakers = Vec::new();
-    let first = self.shut(&mut wakers);
-    wake_all(wakers);
+    let first = self.shut();
+    let mut wakes = Wakes::new();
+    self.dispatch_close(&mut wakes);
+    wakes.finish();
     first
   }
 
-  /// Every state change of a close, and no waker run: each lane's room and its ring's mark, each
-  /// lane's waiting receivers notified, the closed flag, and the `closed()` futures notified. The
-  /// wakers go onto `wakers`.
-  fn shut(&self, wakers: &mut Vec<Waker>) -> bool {
+  /// Every state change of a close, and no waker run, and nothing allocated: each lane's room and
+  /// its ring's mark, each lane's waiting receivers notified, the closed flag, and the `closed()`
+  /// futures notified. Every wake is left owed in its waiter's place.
+  fn shut(&self) -> bool {
     let first = !self.closing.swap(true, Ordering::SeqCst);
     for state in self.lanes.iter() {
-      state.reserves.close(&state.remaining, wakers);
+      state.reserves.close(&state.remaining);
       state.ring.close();
     }
     for state in self.lanes.iter() {
-      state.arrivals.close(wakers);
+      state.arrivals.close();
     }
     // `Release`, after every mark: a thread that reads the flag set (`Acquire`) sees every lane
     // closed, so a send it makes afterwards reads its lane's mark.
     self.closed.store(true, Ordering::Release);
-    lock(&self.closers).notify_all(wakers);
+    lock(&self.closers).notify_all();
     first
+  }
+
+  /// Wakes every waiter a close left owed: each lane's reserves and receivers, then the `closed()`
+  /// futures.
+  fn dispatch_close(&self, wakes: &mut Wakes) {
+    for state in self.lanes.iter() {
+      state.reserves.dispatch(wakes);
+      state.arrivals.dispatch(wakes);
+    }
+    waiters::dispatch(&self.closers, wakes);
   }
 
   /// Whether the channel is closed: a close has marked every lane.
@@ -474,33 +488,31 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     if self.receivers.fetch_sub(1, Ordering::AcqRel) != 1 {
       return;
     }
-    let mut wakers = Vec::new();
-    self.shut(&mut wakers);
+    self.shut();
     let mut wakes = Wakes::new();
-    for waker in wakers {
-      wakes.wake(Some(waker));
-    }
-    let mut ahead = Vec::new();
+    self.dispatch_close(&mut wakes);
+    // Each item is dropped after the choice lock is let go, under its own catch. The close has
+    // emptied every line, so a room given back here grants no reserve. The lookahead is drained
+    // one lane at a time, the lock taken for each, so that nothing is collected.
+    let mut payloads = Vec::new();
     if let Some(choice) = &self.choice {
       // A receive in progress holds a `Receiver`, so no policy can drop the last one from inside
       // a choice of this channel; the refusal stands guard all the same.
       reentry::refuse(self.address(), "dropped the last receiver");
-      let mut choice = lock(choice);
-      for (index, slot) in choice.ahead.iter_mut().enumerate() {
-        if let Some(popped) = slot.take() {
-          self.lanes[index]
-            .taken
-            .store(popped.ordinal + 1, Ordering::Relaxed);
-          ahead.push((index, popped.item));
+      for (index, state) in self.lanes.iter().enumerate() {
+        let popped = {
+          let mut choice = lock(choice);
+          let popped = choice.ahead[index].take();
+          if let Some(popped) = &popped {
+            state.taken.store(popped.ordinal + 1, Ordering::Relaxed);
+          }
+          popped
+        };
+        if let Some(popped) = popped {
+          wakes.wake(state.release());
+          contain(popped.item, &mut payloads);
         }
       }
-    }
-    // Each item is dropped after the choice lock is let go, under its own catch. The close has
-    // emptied every line, so a room given back here grants no reserve.
-    let mut payloads = Vec::new();
-    for (index, item) in ahead {
-      wakes.wake(self.lanes[index].release());
-      contain(item, &mut payloads);
     }
     for state in self.lanes.iter() {
       while let Some(popped) = state.ring.pop() {
