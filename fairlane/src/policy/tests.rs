@@ -172,11 +172,36 @@ fn elapsed_is_live() {
 fn elapsed_saturates_a_huge_wait() {
   let policy = Elapsed::<Three>::new(Duration::MAX);
   let wait = policy.max_wait(Three::A).unwrap();
-  assert_eq!(wait, Duration::from_nanos(u64::MAX - 1));
+  assert_eq!(wait, Duration::from_nanos(u64::MAX));
   assert_eq!(
     policy.owed(&waits(u64::MAX / 1_000_000, Some(0), None)),
     None
   );
+}
+
+/// The largest wait is kept as it was set, apart from having none: a wait of exactly `u64::MAX`
+/// nanoseconds is not exceeded by a wait of `u64::MAX` nanoseconds, and reads back unchanged.
+#[test]
+fn elapsed_keeps_the_largest_wait_apart_from_none() {
+  let largest = Duration::from_nanos(u64::MAX);
+  let policy = Elapsed::<Three>::new(largest);
+  assert_eq!(policy.max_wait(Three::B), Some(largest));
+  let view = LaneView::new(Moment::from_nanos(u64::MAX))
+    .with_lane(Three::B, 1, Some(Moment::from_nanos(u64::MAX)), 0)
+    .with_lane(Three::C, 1, Some(Moment::from_nanos(0)), 0);
+  assert_eq!(
+    policy.owed(&view),
+    None,
+    "C waited exactly its wait, which is not more"
+  );
+  policy.set_max_wait(Three::C, None);
+  assert_eq!(policy.max_wait(Three::C), None);
+  policy.set_max_wait(Three::C, Some(Duration::from_nanos(u64::MAX - 1)));
+  assert_eq!(
+    policy.max_wait(Three::C),
+    Some(Duration::from_nanos(u64::MAX - 1))
+  );
+  assert_eq!(policy.owed(&view), Some(Three::C), "one nanosecond over");
 }
 
 #[test]

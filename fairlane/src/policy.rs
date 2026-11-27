@@ -1,7 +1,7 @@
 use core::{
   fmt,
   num::NonZeroU32,
-  sync::atomic::{AtomicU32, AtomicU64, Ordering},
+  sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
   time::Duration,
 };
 
@@ -343,18 +343,50 @@ impl<L: Lane> Policy<L> for PassLimit<L> {
 /// more overdue.
 ///
 /// The waits are live: [`set_max_wait`](Self::set_max_wait) takes effect at the next choice.
+///
+/// A wait is kept in whole nanoseconds, and reads back exactly as set up to `u64::MAX` of them,
+/// about 584 years. A longer one is kept, and read back, as `u64::MAX` nanoseconds: no wait a
+/// [`Moment`] can measure exceeds either, so the lane is owed exactly when it would be.
 pub struct Elapsed<L: Lane, C = Monotonic> {
-  /// One wait per lane, in nanoseconds; `u64::MAX` is no wait.
-  max_waits: PerLane<AtomicU64, L>,
+  max_waits: PerLane<MaxWait, L>,
   clock: C,
 }
 
-const NO_WAIT: u64 = u64::MAX;
+/// One lane's longest wait. Having none is kept apart from the wait itself, so that every wait,
+/// the largest included, reads back as it was set.
+struct MaxWait {
+  nanos: AtomicU64,
+  /// The lane has no wait, and may starve.
+  none: AtomicBool,
+}
 
-/// A wait as stored: saturating just below [`NO_WAIT`], about 584 years.
-#[inline]
-fn wait_nanos(max_wait: Option<Duration>) -> u64 {
-  max_wait.map_or(NO_WAIT, |wait| saturating_nanos(wait).min(NO_WAIT - 1))
+impl MaxWait {
+  fn new(max_wait: Option<Duration>) -> Self {
+    let wait = Self {
+      nanos: AtomicU64::new(0),
+      none: AtomicBool::new(true),
+    };
+    wait.set(max_wait);
+    wait
+  }
+
+  /// A setting of `None` leaves the nanoseconds as they were: a reader racing it reads either
+  /// setting, never a wait no call set.
+  fn set(&self, max_wait: Option<Duration>) {
+    match max_wait {
+      Some(wait) => {
+        self.nanos.store(saturating_nanos(wait), Ordering::Relaxed);
+        // `Release`: a reader that sees the wait (`Acquire`) reads these nanoseconds, or later ones.
+        self.none.store(false, Ordering::Release);
+      }
+      None => self.none.store(true, Ordering::Relaxed),
+    }
+  }
+
+  /// The wait in nanoseconds, where the lane has one.
+  fn nanos(&self) -> Option<u64> {
+    (!self.none.load(Ordering::Acquire)).then(|| self.nanos.load(Ordering::Relaxed))
+  }
 }
 
 impl<L: Lane> Elapsed<L> {
@@ -368,9 +400,8 @@ impl<L: Lane> Elapsed<L> {
 impl<L: Lane, C> Elapsed<L, C> {
   /// `max_wait` for every lane, on `clock`.
   pub fn with_clock(max_wait: Duration, clock: C) -> Self {
-    let nanos = wait_nanos(Some(max_wait));
     Self {
-      max_waits: PerLane::from_array(Array::from_fn(|_| AtomicU64::new(nanos))),
+      max_waits: PerLane::from_array(Array::from_fn(|_| MaxWait::new(Some(max_wait)))),
       clock,
     }
   }
@@ -383,20 +414,16 @@ impl<L: Lane, C> Elapsed<L, C> {
     self
   }
 
-  /// `lane`'s longest wait, where it has one.
+  /// `lane`'s longest wait, where it has one: as it was set, up to `u64::MAX` nanoseconds.
   #[inline]
   pub fn max_wait(&self, lane: L) -> Option<Duration> {
-    let nanos = self.max_waits.get(lane).load(Ordering::Relaxed);
-    (nanos != NO_WAIT).then(|| Duration::from_nanos(nanos))
+    self.max_waits.get(lane).nanos().map(Duration::from_nanos)
   }
 
   /// Replaces `lane`'s longest wait, live: the next choice reads it.
   #[inline]
   pub fn set_max_wait(&self, lane: L, max_wait: Option<Duration>) {
-    self
-      .max_waits
-      .get(lane)
-      .store(wait_nanos(max_wait), Ordering::Relaxed);
+    self.max_waits.get(lane).set(max_wait);
   }
 }
 
@@ -411,8 +438,7 @@ impl<L: Lane> Default for Elapsed<L> {
 impl<L: Lane, C: fmt::Debug> fmt::Debug for Elapsed<L, C> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     let waits = PerLane::<Option<Duration>, L>::from_array(Array::from_fn(|index| {
-      let nanos = self.max_waits.at(index).load(Ordering::Relaxed);
-      (nanos != NO_WAIT).then(|| Duration::from_nanos(nanos))
+      self.max_waits.at(index).nanos().map(Duration::from_nanos)
     }));
     f.debug_struct("Elapsed")
       .field("max_waits", &waits)
@@ -433,10 +459,9 @@ impl<L: Lane, C: Clock> Policy<L> for Elapsed<L, C> {
     let now = view.now();
     let mut owed: Option<(L, u64)> = None;
     for lane in view.lanes() {
-      let max_wait = self.max_waits.get(lane).load(Ordering::Relaxed);
-      if max_wait == NO_WAIT {
+      let Some(max_wait) = self.max_waits.get(lane).nanos() else {
         continue;
-      }
+      };
       let Some(oldest) = view.oldest(lane) else {
         continue;
       };
