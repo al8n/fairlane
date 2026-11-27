@@ -73,12 +73,25 @@ impl Drop for Wakes {
   }
 }
 
-/// Drops a caught panic's payload under a catch of its own. A payload whose drop panics again is
-/// forgotten, so that a disposal always ends.
+/// How many payloads one disposal drops in turn, each caught from the drop of the one before.
+///
+/// A payload whose drop panics hands over a payload of its own, which may own something that only
+/// its drop gives back: another channel's permit, for instance. So each is dropped in turn. A
+/// destructor that panics anew at every drop would make the chain endless; past this many links
+/// the last payload is forgotten, a leak, so that a disposal always ends.
+const DISPOSALS: usize = 8;
+
+/// Drops a caught panic's payload, and each payload its drop panics with in turn, each under a
+/// catch of its own, up to [`DISPOSALS`] of them.
 pub(crate) fn dispose(payload: Box<dyn Any + Send>) {
-  if let Err(again) = catch_unwind(AssertUnwindSafe(move || drop(payload))) {
-    mem::forget(again);
+  let mut payload = payload;
+  for _ in 0..DISPOSALS {
+    match catch_unwind(AssertUnwindSafe(move || drop(payload))) {
+      Ok(()) => return,
+      Err(again) => payload = again,
+    }
   }
+  mem::forget(payload);
 }
 
 /// Wakes `waker`, as [`Wakes`] does.

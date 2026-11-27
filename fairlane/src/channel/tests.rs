@@ -364,6 +364,47 @@ fn a_disconnect_wakes_its_waiters_before_dropping_items() {
   );
 }
 
+/// A panic payload that hands the permit it owns on as the payload of a panic of its own.
+struct HandsOver(Option<crate::OwnedPermit<u32, Single, DefaultPolicy<Single>>>);
+
+impl Drop for HandsOver {
+  fn drop(&mut self) {
+    if let Some(permit) = self.0.take() {
+      std::panic::panic_any(permit);
+    }
+  }
+}
+
+/// An item whose drop panics with a `HandsOver` payload.
+struct Passes(Option<crate::OwnedPermit<u32, Single, DefaultPolicy<Single>>>);
+
+impl Drop for Passes {
+  fn drop(&mut self) {
+    std::panic::panic_any(HandsOver(self.0.take()));
+  }
+}
+
+/// A drained item's panic payload whose drop panics with a payload of its own is disposed of in
+/// turn: the second payload, another channel's permit, is dropped, and its room is given back.
+#[test]
+fn a_disposal_drops_the_payload_its_payload_hands_on() {
+  let (other, other_rx) = bounded::<u32>(cap(1)).unwrap();
+  let mut reserve = other.reserve_owned(Single);
+  let Poll::Ready(Ok(permit)) = poll_with(&mut reserve, core::task::Waker::noop()) else {
+    panic!("the other channel has room");
+  };
+  let (tx, rx) = bounded::<Passes>(cap(1)).unwrap();
+  tx.try_send(Single, Passes(Some(permit))).unwrap();
+  assert_eq!(other.snapshot().remaining(Single), 0);
+  drop(rx);
+  assert_eq!(
+    other.snapshot().remaining(Single),
+    1,
+    "the permit's room is back"
+  );
+  drop(other_rx);
+}
+
 #[test]
 fn snapshot_reads_each_lane() {
   let (tx, rx) = bounded::<u32>(cap(4)).unwrap();
