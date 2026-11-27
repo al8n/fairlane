@@ -117,6 +117,28 @@ no gap.
 `channel_with(options, policy)` takes any of them, or your own `Policy`. A policy is pure: it reads
 a view of the waiting lanes and names the one owed, or none.
 
+## Wakers and policies
+
+A channel runs two kinds of your code while it works: the `Waker`s of the tasks that wait on it,
+and its `Policy`.
+
+- **A `Waker` must not panic.** A channel runs every waker outside its locks, once the state
+  changes the wake stands for are made. If a waker panics anyway, there is no undefined behaviour,
+  no unit of capacity is lost, and every other pending wake still runs. The panic then unwinds out
+  of the call that ran the waker. The value that call was handing back on that thread may be
+  dropped by the unwind: the item of a single receive (`recv`, `try_recv`, `recv_blocking`), or
+  the item a send hands back because its lane has spent its positions. A batched receive keeps
+  every item it took in its `Vec`. The panic is not swallowed: that would hide a bug in the
+  executor.
+- **A `Policy` must not block, and must not call any channel operation, on any channel.** Its
+  `stamp` and `owed`, and the clock they read, run while a channel holds its choice lock, or while
+  a send holds room it has not committed. A call into a channel there may deadlock, as any callback
+  run under a lock may. Where it is cheap to tell, the call is refused by name instead: a receive,
+  or a reserve that must wait, made on the same thread inside the choice of the same channel,
+  panics with the cause.
+- **A `Policy::Stamp` should be small,** a few words: a receive's view of the lanes holds one
+  reading per lane, each with a stamp, on the stack.
+
 ## Features
 
 | Feature | Default | What it adds |

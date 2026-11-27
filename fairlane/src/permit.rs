@@ -39,6 +39,15 @@ impl<'a, T, L: Lane, Y: Policy<L>> Permit<'a, T, L, Y> {
   /// ([`Received::ordinal`](crate::Received::ordinal)); it then hands the item back and lets the
   /// room go.
   ///
+  /// # Panics
+  ///
+  /// - Where the policy's `stamp` panics, before the commit, the room is let go and the item is
+  ///   dropped by the unwind.
+  /// - A `Waker` must not panic (the crate's documentation, "Wakers and policies"). If one this
+  ///   send wakes panics anyway, the panic unwinds out of this call: after the item is committed,
+  ///   or, where the lane has spent its positions and closes, with the item it was handing back
+  ///   dropped.
+  ///
   /// ```
   /// # use core::num::NonZeroUsize;
   /// use fairlane::{SendError, Single};
@@ -103,6 +112,10 @@ impl<T, L: Lane, Y: Policy<L>> OwnedPermit<T, L, Y> {
   /// [`Permit::send`], for an owned permit. Its sender goes once the item is committed. Where it
   /// was the last sender, that closes the channel, and a waker the close runs that panics unwinds
   /// out of this call with the item already committed.
+  ///
+  /// # Panics
+  ///
+  /// As [`Permit::send`].
   pub fn send(mut self, item: T) -> Result<(), SendError<T>> {
     match self.sender.take() {
       Some(sender) => Permit::new(sender.shared(), self.index, self.lane).send(item),

@@ -466,9 +466,9 @@ impl<T, L: Lane, Y: Policy<L>> Receiver<T, L, Y> {
   ///
   /// # Panics
   ///
-  /// Where the policy panics, or the waker of another task that this receive wakes, the panic
-  /// unwinds out of this call. Every item taken before it is already in `into`, and stays there for
-  /// a caller that catches the unwind; no other item, and no room, is lost.
+  /// Where the policy panics, or, against its contract, the waker of another task that this receive
+  /// wakes, the panic unwinds out of this call. Every item taken before it is already in `into`, and
+  /// stays there for a caller that catches the unwind; no other item, and no room, is lost.
   #[inline]
   pub fn recv_many<'a>(
     &'a self,
@@ -545,10 +545,11 @@ impl<T, L: Lane, Y: Policy<L>> Receiver<T, L, Y> {
   ///
   /// # Panics
   ///
-  /// Where the policy panics, the panic unwinds out of this call before any item is taken. Where
-  /// the waker of another task panics as this receive wakes it, after the item was taken, the panic
-  /// unwinds out of this call and the item is dropped with it: [`recv_many`](Self::recv_many)
-  /// keeps such an item in its `into`. No room is lost either way.
+  /// - A `Waker` must not panic (the crate's documentation, "Wakers and policies"). If one this
+  ///   receive wakes panics anyway, after the item was taken, the panic unwinds out of this call and
+  ///   the item is dropped with it; no room is lost, and every other wake still runs.
+  ///   [`recv_many`](Self::recv_many) keeps such an item in its `into`.
+  /// - Where the policy panics, the panic unwinds out of this call before any item is taken.
   #[inline]
   pub fn recv(&self) -> Recv<'_, T, L, Y> {
     Recv {

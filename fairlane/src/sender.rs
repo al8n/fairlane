@@ -123,6 +123,11 @@ impl<T, L: Lane, Y: Policy<L>> Sender<T, L, Y> {
 
   /// Reserves room in `lane`, waiting for it, and commits `item` there. The item comes back in
   /// the error where the channel is closed.
+  ///
+  /// # Panics
+  ///
+  /// As [`Permit::send`]: a panicking `stamp`, or a `Waker` that panics against its contract,
+  /// unwinds out of the poll, and an item being handed back may be dropped with it.
   #[inline]
   pub fn send(&self, lane: L, item: T) -> Sending<'_, T, L, Y> {
     Sending {
@@ -133,6 +138,10 @@ impl<T, L: Lane, Y: Policy<L>> Sender<T, L, Y> {
 
   /// Commits `item` to `lane` now, or hands it back: `Full` where the lane has no room, or where
   /// an earlier reserve waits for it.
+  ///
+  /// # Panics
+  ///
+  /// As [`Permit::send`].
   pub fn try_send(&self, lane: L, item: T) -> Result<(), TrySendError<T>> {
     self.try_send_at(self.shared.resolve(lane), lane, item)
   }
@@ -148,6 +157,10 @@ impl<T, L: Lane, Y: Policy<L>> Sender<T, L, Y> {
   }
 
   /// [`send`](Self::send), parking this thread while it waits.
+  ///
+  /// # Panics
+  ///
+  /// As [`Permit::send`].
   pub fn send_blocking(&self, lane: L, item: T) -> Result<(), SendError<T>> {
     let index = self.shared.resolve(lane);
     match self.try_send_at(index, lane, item) {

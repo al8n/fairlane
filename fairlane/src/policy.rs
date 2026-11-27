@@ -25,19 +25,28 @@ pub const DEFAULT_MAX_WAIT: Duration = Duration::from_secs(2);
 ///
 /// # Contract
 ///
-/// `stamp` and `owed` are pure and never panic. The receiving side calls them while it holds the
-/// channel's choice lock, so they must not block, and must not call back into the channel they
-/// serve, from this thread or any other: a receive of that channel would wait for that lock, and
-/// a reserve that must wait would wait for a receive. On this thread such a call is refused by
-/// name, with a panic; a send that does not wait is not checked, and is as forbidden.
+/// `stamp` and `owed`, and the clock they read, are pure and never panic. They must not block, and
+/// must not call any channel operation, on any channel, from this thread or any other.
 ///
-/// A policy that breaks this contract by panicking loses no item and no room: the receive unwinds,
-/// and what it had taken is the caller's.
+/// - `owed`, and the `stamp` a receive takes, run while the channel holds its choice lock; the
+///   `stamp` of a send runs while the send holds room it has not committed.
+/// - A call into a channel there may deadlock, as any callback run under a lock may: a receive of
+///   this channel waits for the lock its own thread holds, a reserve that must wait waits for a
+///   receive, and two channels whose policies receive from each other wait for each other.
+/// - Where it is cheap to tell, such a call is refused by name instead: a receive of this channel,
+///   or a reserve of it that must wait, made on this thread inside its choice, panics with the
+///   cause. The rest are not checked, and are as forbidden.
+///
+/// A policy that breaks this contract by panicking loses no item and no room: the receive or the
+/// send unwinds, and what the receive had taken is the caller's.
 ///
 /// The lanes of one view are read at different instants, one after another, so a view is not one
 /// atomic reading of the channel.
 pub trait Policy<L: Lane>: Send + Sync + 'static {
   /// What is recorded with each item at its commit. `()` records nothing and costs nothing.
+  ///
+  /// It should be small, a few words: a receive's view of the lanes holds one reading per lane,
+  /// each with a stamp, on the stack.
   type Stamp: Copy + Send + 'static;
 
   /// A stamp for an item being committed now. The receiving side also takes one per receive, as
