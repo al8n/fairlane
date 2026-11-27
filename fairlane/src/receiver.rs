@@ -24,7 +24,10 @@ use crate::{
 };
 
 /// The receiving half of a channel. Clones share the channel: each item goes to one receive.
-/// The last one dropped closes the channel and lets go of what is queued.
+/// The last one dropped closes the channel and lets go of what is queued, on its own thread: the
+/// wakers of what the close resolves run first, then the items' destructors. A destructor must not
+/// block on anyone who waits on this channel (the crate's documentation, "Wakers, policies and
+/// items").
 pub struct Receiver<T, L: Lane = Single, Y: Policy<L> = DefaultPolicy<L>> {
   shared: Arc<Shared<T, L, Y>>,
 }
@@ -475,9 +478,10 @@ impl<T, L: Lane, Y: Policy<L>> Receiver<T, L, Y> {
   ///
   /// # Panics
   ///
-  /// Where the policy panics, or, against its contract, the waker of another task that this receive
-  /// wakes, the panic unwinds out of this call. Every item taken before it is already in `into`, and
-  /// stays there for a caller that catches the unwind; no other item, and no room, is lost.
+  /// Where the policy panics, or, against its contract (the crate's documentation, "Wakers,
+  /// policies and items"), the waker of another task that this receive wakes, the panic unwinds out
+  /// of this call. Every item taken before it is already in `into`, and stays there for a caller
+  /// that catches the unwind; no other item, and no room, is lost.
   #[inline]
   pub fn recv_many<'a>(
     &'a self,
@@ -554,10 +558,11 @@ impl<T, L: Lane, Y: Policy<L>> Receiver<T, L, Y> {
   ///
   /// # Panics
   ///
-  /// - A `Waker` must not panic (the crate's documentation, "Wakers and policies"). If one this
-  ///   receive wakes panics anyway, after the item was taken, the panic unwinds out of this call and
-  ///   the item is dropped with it; no room is lost, and every other wake still runs.
-  ///   [`recv_many`](Self::recv_many) keeps such an item in its `into`.
+  /// - A `Waker` must not panic, block, or call into a channel (the crate's documentation, "Wakers,
+  ///   policies and items"): a channel has no executor, and every wake runs on the caller's
+  ///   thread. If one this receive wakes panics anyway, after the item was taken, the panic unwinds
+  ///   out of this call and the item is dropped with it; no room is lost, and every other wake
+  ///   still runs. [`recv_many`](Self::recv_many) keeps such an item in its `into`.
   /// - Where the policy panics, the panic unwinds out of this call before any item is taken.
   #[inline]
   pub fn recv(&self) -> Recv<'_, T, L, Y> {

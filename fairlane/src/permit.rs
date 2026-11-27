@@ -41,12 +41,13 @@ impl<'a, T, L: Lane, Y: Policy<L>> Permit<'a, T, L, Y> {
   ///
   /// # Panics
   ///
-  /// - Where the policy's `stamp` panics, before the commit, the room is let go and the item is
-  ///   dropped by the unwind.
-  /// - A `Waker` must not panic (the crate's documentation, "Wakers and policies"). If one this
-  ///   send wakes panics anyway, the panic unwinds out of this call: after the item is committed,
-  ///   or, where the lane has spent its positions and closes, with the item it was handing back
-  ///   dropped.
+  /// - Where the policy's `stamp` panics, before the commit, the room is given back, and then the
+  ///   item is dropped by the unwind.
+  /// - A `Waker` must not panic, block, or call into a channel (the crate's documentation,
+  ///   "Wakers, policies and items"): a channel has no executor, and every wake runs on the
+  ///   caller's thread. If one this send wakes panics anyway, the panic unwinds out of this call:
+  ///   after the item is committed, or, where the lane has spent its positions and closes, with the
+  ///   item it was handing back dropped.
   ///
   /// ```
   /// # use core::num::NonZeroUsize;
