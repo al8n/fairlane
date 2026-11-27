@@ -32,8 +32,11 @@ use crate::{
 
 /// A pending receive's notification identity, shared by its places in every lane's line.
 ///
-/// One word, read and changed only by compare-and-swap, under whichever lane's lock is giving a
-/// notice: the lanes' locks differ, so one word is what keeps a receive to one notice.
+/// One word. A lane giving a notice changes it only by compare-and-swap, `FREE` to its lane, under
+/// that lane's lock: the lanes' locks differ, so one word is what keeps a receive to one notice.
+/// The receive's leave swaps it to `GONE` unconditionally, before it takes any lock: a notice given
+/// before the swap is what the swap answers, given again by the leave, and one given after it fails
+/// on `GONE`.
 pub(crate) struct Receive {
   /// [`FREE`], a notice's lane plus one, or [`GONE`].
   held: AtomicUsize,
