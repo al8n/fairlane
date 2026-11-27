@@ -406,17 +406,18 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   }
 }
 
-/// What a receive's take owes the other receivers, should it unwind: whatever the panic, a
-/// destination that cannot grow or a `Lane` or policy method. Dropped while armed, after the
-/// take's own locks are let go:
+/// What a receive's poll owes the other receivers, should it unwind, wherever and whatever the
+/// panic: a destination or a waiter line that cannot grow, a `Lane` or policy method, a waker's
+/// clone. Dropped while armed, after the poll's own locks are let go:
 ///
-/// - **The places the receive still holds** are left as a dropped receive leaves them, each
-///   notification passed on to the next receiver in its line. A notification held across the
-///   unwind would hold its lane's line for as long as the future is kept, and wake nobody.
-/// - **Where the receive spent its notifications** in this poll, the chain runs, so that the
-///   receivers it would have woken by taking are woken still.
+/// - **The places the receive holds** are left as a dropped receive leaves them, each notification
+///   passed on to the next receiver in its line. A notification held across the unwind would hold
+///   its lane's line for as long as the future is kept, and wake nobody.
+/// - **Where the receive spent its notifications** and its take then unwound, the chain runs, so
+///   that the receivers it would have woken by taking are woken still.
 ///
-/// A future polled again after the unwind joins the lines afresh.
+/// So a poll that unwinds leaves the channel's lines as they were before the receive joined them.
+/// A future polled again after it joins the lines afresh.
 struct Unwind<'a, T, L: Lane, Y: Policy<L>> {
   arrival: &'a mut Arrival<L>,
   shared: &'a Shared<T, L, Y>,
@@ -673,12 +674,12 @@ impl<T, L: Lane, Y: Policy<L>> fmt::Debug for Receiver<T, L, Y> {
 /// A receive's wait: its place in the line of each lane its quota admits.
 ///
 /// - **To sleep** it joins the line of each lane, then looks again. Each place goes into the
-///   future the moment it exists, so a waker clone that panics on a later lane leaves the earlier
-///   places to the future's drop. A future polled again after such a panic joins the lines it had
-///   not joined, before it can wait: a lane it is missing from would never wake it.
-/// - **On waking** it leaves every line, spending its notifications, and takes. Where a take
-///   unwinds, an [`Unwind`] leaves every line the receive is still in, passing its notifications
-///   on, and runs the chain the take would have run where it had spent them.
+///   future the moment it exists, so that a panic on a later lane, a waker clone's or a line's that
+///   cannot grow, leaves the earlier places to the poll's [`Unwind`].
+/// - **On waking** it leaves every line, spending its notifications, and takes.
+/// - **Wherever its poll unwinds,** the [`Unwind`] leaves every line the receive is in, passing its
+///   notifications on, and runs the chain where the receive had spent them and its take unwound. A
+///   future polled again after joins every line afresh, before it can wait.
 /// - **Dropped while it waits,** it leaves every line and passes on a notification it held. Every
 ///   line is left first, each under its own lock; then the wakers it let go run, each under its
 ///   own catch. So a waker that panics leaves no place behind, and a place left behind would hold
@@ -762,43 +763,43 @@ impl<L: Lane> Arrival<L> {
       return Poll::Ready(Err(RecvManyError::EmptyQuota));
     }
     let mut wakes = Wakes::new();
-    let mut spent = false;
+    // Declared after `wakes`, so that an unwind leaves the lines before the wakers `wakes` holds
+    // are dropped.
+    let mut unwind = Unwind {
+      arrival: self,
+      shared,
+      quota,
+      spent: false,
+      armed: true,
+    };
     let polled = loop {
-      let took = {
-        let mut unwind = Unwind {
-          arrival: &mut *self,
-          shared,
-          quota,
-          spent,
-          armed: true,
-        };
-        let took = shared.take(quota, sink);
-        unwind.armed = false;
-        took
-      };
-      spent = false;
+      let took = shared.take(quota, sink);
+      unwind.spent = false;
+      let arrival = &mut *unwind.arrival;
       match took {
         Took::Items(held) => {
-          self.leave(shared, true, &mut wakes);
+          arrival.leave(shared, true, &mut wakes);
           shared.chain(quota);
           break Poll::Ready(Ok(held));
         }
         Took::Ended => {
-          self.leave(shared, true, &mut wakes);
+          arrival.leave(shared, true, &mut wakes);
           break Poll::Ready(Err(RecvManyError::Ended));
         }
         Took::Nothing => {}
       }
-      if !self.registered {
-        self.sleep(shared, quota, cx.waker());
+      if !arrival.registered {
+        arrival.sleep(shared, quota, cx.waker());
         continue;
       }
-      if !self.woken(shared, cx.waker(), &mut wakes) {
+      if !arrival.woken(shared, cx.waker(), &mut wakes) {
         break Poll::Pending;
       }
-      self.leave(shared, true, &mut wakes);
-      spent = true;
+      arrival.leave(shared, true, &mut wakes);
+      unwind.spent = true;
     };
+    unwind.armed = false;
+    drop(unwind);
     wakes.finish();
     polled
   }
