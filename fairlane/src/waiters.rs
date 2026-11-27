@@ -207,7 +207,7 @@ impl<X> Waiters<X> {
   /// woken. `None` where nobody is in line.
   pub(crate) fn notify_oldest(&mut self) -> Option<Option<Waker>> {
     let index = self.first_queued()?;
-    Some(self.notify_at(index, true))
+    Some(self.notify_at(index))
   }
 
   /// The oldest place in line, where any is.
@@ -229,17 +229,16 @@ impl<X> Waiters<X> {
     &self.entry_at(index).tag
   }
 
-  /// Notifies the waiter in line at the place `index`: out of the line, and `Notified`. Its waker
-  /// is taken out, to be woken, where `take`; else it stays in its place, for its holder to drop,
-  /// since that waiter was woken already.
-  pub(crate) fn notify_at(&mut self, index: usize, take: bool) -> Option<Waker> {
+  /// Notifies the waiter in line at the place `index`: out of the line, `Notified`, and its waker
+  /// taken out to be woken.
+  pub(crate) fn notify_at(&mut self, index: usize) -> Option<Waker> {
     debug_assert_eq!(self.entry_at(index).state, State::Queued);
     self.unlink(Which::Line, index);
     self.queued -= 1;
     self.notified += 1;
     let entry = self.entry_at_mut(index);
     entry.state = State::Notified;
-    if take { entry.waker.take() } else { None }
+    entry.waker.take()
   }
 
   /// Notifies every waiter in line, and leaves each waker owed, for [`dispatch`] to wake.

@@ -698,11 +698,12 @@ fn a_notified_receive_is_passed_over_on_its_other_lanes() {
   );
 }
 
-/// Where a lane's only receive already holds another lane's notice, it takes this lane's, and the
-/// notice it held passes on in its own lane: a receive of A and B notified by a commit to B, then
-/// the only one for A's commit, leaves B's notice to the receive of B alone.
+/// A woken receive polled promptly leaves the rest to the chain. A receive of every lane holds
+/// B's notice when A's commit finds no other receive in A's line, so that notice is dropped: the
+/// receive of B alone waits. The first receive, polled promptly as the contract asks, takes A's
+/// item, by priority, and its chain wakes the receive of B alone for B's.
 #[test]
-fn a_notice_moves_to_the_lane_only_its_receive_can_serve() {
+fn a_woken_receive_polled_promptly_leaves_the_rest_to_the_chain() {
   let (tx, rx) = channel_with::<u32, Three, _>(three(1, false), Strict).unwrap();
   let (first_probe, first_waker) = Probe::new();
   let (second_probe, second_waker) = Probe::new();
@@ -712,21 +713,25 @@ fn a_notice_moves_to_the_lane_only_its_receive_can_serve() {
   assert!(poll_with(&mut first, &first_waker).is_pending());
   assert!(poll_with(&mut second, &second_waker).is_pending());
   tx.try_send(Three::B, 1).unwrap();
-  assert!(first_probe.take(), "the oldest receive of B");
-  assert!(!second_probe.take());
   tx.try_send(Three::A, 2).unwrap();
-  assert!(
-    second_probe.take(),
-    "B's notice passed to the receive of B alone"
-  );
-  assert!(!first_probe.take(), "the first receive was woken already");
+  assert!(first_probe.take(), "the oldest receive of B");
+  let Poll::Ready(Ok(received)) = poll_with(&mut first, &first_waker) else {
+    panic!("the woken receive takes an item");
+  };
+  assert_eq!(received.lane(), Three::A, "by priority");
+  assert!(second_probe.take(), "the chain woke the receive of B alone");
+  assert!(matches!(
+    poll_with(&mut second, &second_waker),
+    Poll::Ready(Ok(_))
+  ));
 }
 
-/// A notice moves along the lines as far as it must: receives of {A, B}, {B, C} and {C}, notified
-/// by commits to B and to C, then a commit to A, which only the first can serve. A's notice moves
-/// the first receive's B notice to the second, and the second's C notice to the third.
+/// Woken receives polled promptly serve every item, each chain waking the next. Receives of
+/// {A, B}, {B, C} and {C}; commits to B and C notify the first two, and A's commit, whose only
+/// receive holds a notice already, is dropped. Polled in turn, the first takes A's item and the
+/// second B's, and the second's chain wakes the third for C's.
 #[test]
-fn a_notice_moves_along_the_lines_to_a_receive_holding_none() {
+fn woken_receives_polled_promptly_serve_every_item() {
   let (tx, rx) = channel_with::<u32, Three, _>(three(1, false), Strict).unwrap();
   let probes: Vec<_> = (0..3).map(|_| Probe::new()).collect();
   let (mut ab, mut bc, mut c) = (Vec::new(), Vec::new(), Vec::new());
@@ -738,11 +743,27 @@ fn a_notice_moves_along_the_lines_to_a_receive_holding_none() {
   assert!(poll_with(&mut third, &probes[2].1).is_pending());
   tx.try_send(Three::B, 1).unwrap();
   tx.try_send(Three::C, 2).unwrap();
-  assert!(probes[0].0.take() && probes[1].0.take() && !probes[2].0.take());
   tx.try_send(Three::A, 3).unwrap();
-  assert!(probes[2].0.take(), "three items, three receives notified");
-  assert!(
-    !probes[0].0.take() && !probes[1].0.take(),
-    "none woken twice"
+  assert!(probes[0].0.take() && probes[1].0.take(), "one notice each");
+  assert!(matches!(
+    poll_with(&mut first, &probes[0].1),
+    Poll::Ready(Ok(_))
+  ));
+  assert!(matches!(
+    poll_with(&mut second, &probes[1].1),
+    Poll::Ready(Ok(_))
+  ));
+  assert!(probes[2].0.take(), "the second's chain woke the third");
+  assert!(matches!(
+    poll_with(&mut third, &probes[2].1),
+    Poll::Ready(Ok(_))
+  ));
+  drop((first, second, third));
+  assert_eq!(
+    (ab.len(), bc.len(), c.len()),
+    (1, 1, 1),
+    "every item served"
   );
+  let lanes = [ab[0].lane(), bc[0].lane(), c[0].lane()];
+  assert_eq!(lanes, [Three::A, Three::B, Three::C]);
 }
