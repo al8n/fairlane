@@ -1,38 +1,76 @@
 use std::{
-  sync::Arc,
+  sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering::SeqCst},
+  },
   task::{Wake, Waker},
 };
 
 use super::*;
 
-/// A waker of its own task: wakers made by separate calls never `will_wake` each other, and a clone
-/// `will_wake` its original, so the tests tell waiters apart by their wakers.
-struct Task;
+/// One task's count of wakes.
+struct Task(AtomicUsize);
 
 impl Wake for Task {
-  fn wake(self: Arc<Self>) {}
+  fn wake(self: Arc<Self>) {
+    self.0.fetch_add(1, SeqCst);
+  }
+
+  fn wake_by_ref(self: &Arc<Self>) {
+    self.0.fetch_add(1, SeqCst);
+  }
 }
 
-fn task(_: usize) -> Waker {
-  Waker::from(Arc::new(Task))
+/// Tasks numbered from 0. A waker is told apart by waking it and seeing whose count moved:
+/// `Waker::will_wake` is best effort, and under Miri a clone need not `will_wake` its original.
+struct Tasks(Vec<Arc<Task>>);
+
+impl Tasks {
+  fn new(count: usize) -> Self {
+    Self(
+      (0..count)
+        .map(|_| Arc::new(Task(AtomicUsize::new(0))))
+        .collect(),
+    )
+  }
+
+  fn waker(&self, task: usize) -> Waker {
+    Waker::from(self.0[task].clone())
+  }
+
+  /// The task `waker` wakes.
+  fn which(&self, waker: &Waker) -> usize {
+    let before: Vec<usize> = self.0.iter().map(|task| task.0.load(SeqCst)).collect();
+    waker.wake_by_ref();
+    self
+      .0
+      .iter()
+      .zip(before)
+      .position(|(task, before)| task.0.load(SeqCst) != before)
+      .expect("the waker belongs to one of the tasks")
+  }
+
+  /// The task of the oldest waiter in line, which `notify_oldest` notifies.
+  fn notify(&self, waiters: &mut Waiters) -> usize {
+    let woken = waiters
+      .notify_oldest()
+      .expect("someone is in line")
+      .expect("a waiter in line has its waker");
+    self.which(&woken)
+  }
 }
 
 #[test]
 fn notifies_oldest_first() {
-  let wakers: Vec<Waker> = (0..3).map(task).collect();
+  let tasks = Tasks::new(3);
   let mut waiters = Waiters::new();
-  let keys: Vec<Key> = wakers.iter().map(|w| waiters.insert(w.clone())).collect();
+  let keys: Vec<Key> = (0..3)
+    .map(|task| waiters.insert(tasks.waker(task)))
+    .collect();
   assert_eq!(waiters.queued(), 3);
-  for (index, waker) in wakers.iter().enumerate() {
-    let woken = waiters
-      .notify_oldest()
-      .expect("someone is in line")
-      .unwrap();
-    assert!(
-      woken.will_wake(waker),
-      "waiter {index} is notified in its turn"
-    );
-    assert_eq!(waiters.state(&keys[index]), State::Notified);
+  for (task, key) in keys.iter().enumerate() {
+    assert_eq!(tasks.notify(&mut waiters), task, "notified in its turn");
+    assert_eq!(waiters.state(key), State::Notified);
   }
   assert!(waiters.notify_oldest().is_none());
   assert_eq!((waiters.queued(), waiters.notified()), (0, 3));
@@ -44,68 +82,46 @@ fn notifies_oldest_first() {
 
 #[test]
 fn a_waiter_leaves_from_the_middle_of_the_line() {
-  let wakers: Vec<Waker> = (0..3).map(task).collect();
+  let tasks = Tasks::new(3);
   let mut waiters = Waiters::new();
-  let mut keys: Vec<Option<Key>> = wakers
-    .iter()
-    .map(|w| Some(waiters.insert(w.clone())))
+  let mut keys: Vec<Option<Key>> = (0..3)
+    .map(|task| Some(waiters.insert(tasks.waker(task))))
     .collect();
   let (state, waker) = waiters.remove(keys[1].take().unwrap());
   assert_eq!(state, State::Queued);
-  assert!(waker.unwrap().will_wake(&wakers[1]));
+  assert_eq!(tasks.which(&waker.unwrap()), 1, "its own waker comes back");
   assert_eq!(waiters.queued(), 2);
-  assert!(
-    waiters
-      .notify_oldest()
-      .unwrap()
-      .unwrap()
-      .will_wake(&wakers[0])
-  );
-  assert!(
-    waiters
-      .notify_oldest()
-      .unwrap()
-      .unwrap()
-      .will_wake(&wakers[2])
-  );
+  assert_eq!(tasks.notify(&mut waiters), 0);
+  assert_eq!(tasks.notify(&mut waiters), 2);
   assert!(waiters.notify_oldest().is_none());
 }
 
 #[test]
 fn a_freed_place_is_used_again_and_goes_to_the_back() {
-  let wakers: Vec<Waker> = (0..3).map(task).collect();
+  let tasks = Tasks::new(3);
   let mut waiters = Waiters::new();
-  let first = waiters.insert(wakers[0].clone());
-  let second = waiters.insert(wakers[1].clone());
+  let first = waiters.insert(tasks.waker(0));
+  let second = waiters.insert(tasks.waker(1));
   let _ = waiters.remove(first);
-  let third = waiters.insert(wakers[2].clone());
+  let third = waiters.insert(tasks.waker(2));
   assert_eq!(waiters.slots.len(), 2, "the freed place is used again");
-  assert!(
-    waiters
-      .notify_oldest()
-      .unwrap()
-      .unwrap()
-      .will_wake(&wakers[1])
-  );
-  assert!(
-    waiters
-      .notify_oldest()
-      .unwrap()
-      .unwrap()
-      .will_wake(&wakers[2])
-  );
+  assert_eq!(tasks.notify(&mut waiters), 1);
+  assert_eq!(tasks.notify(&mut waiters), 2);
   let _ = (waiters.remove(second), waiters.remove(third));
 }
 
 #[test]
 fn close_all_closes_every_waiter_and_counts_the_notified() {
-  let wakers: Vec<Waker> = (0..4).map(task).collect();
+  let tasks = Tasks::new(4);
   let mut waiters = Waiters::new();
-  let keys: Vec<Key> = wakers.iter().map(|w| waiters.insert(w.clone())).collect();
+  let keys: Vec<Key> = (0..4)
+    .map(|task| waiters.insert(tasks.waker(task)))
+    .collect();
   let _ = waiters.notify_oldest();
   let mut woken = Vec::new();
   assert_eq!(waiters.close_all(&mut woken), 1, "one grant to settle");
-  assert_eq!(woken.len(), 3, "the waiters still in line are woken");
+  let woken: Vec<usize> = woken.iter().map(|waker| tasks.which(waker)).collect();
+  assert_eq!(woken, [1, 2, 3], "the waiters still in line are woken");
   assert_eq!((waiters.queued(), waiters.notified()), (0, 0));
   assert!(waiters.notify_oldest().is_none());
   for key in keys {
@@ -115,15 +131,15 @@ fn close_all_closes_every_waiter_and_counts_the_notified() {
 
 #[test]
 fn notify_all_notifies_the_line_in_order() {
-  let wakers: Vec<Waker> = (0..3).map(task).collect();
+  let tasks = Tasks::new(3);
   let mut waiters = Waiters::new();
-  let keys: Vec<Key> = wakers.iter().map(|w| waiters.insert(w.clone())).collect();
+  let keys: Vec<Key> = (0..3)
+    .map(|task| waiters.insert(tasks.waker(task)))
+    .collect();
   let mut woken = Vec::new();
   waiters.notify_all(&mut woken);
-  assert_eq!(woken.len(), 3);
-  for (woken, waker) in woken.iter().zip(&wakers) {
-    assert!(woken.will_wake(waker));
-  }
+  let woken: Vec<usize> = woken.iter().map(|waker| tasks.which(waker)).collect();
+  assert_eq!(woken, [0, 1, 2]);
   assert_eq!((waiters.queued(), waiters.notified()), (0, 3));
   for key in keys {
     assert_eq!(waiters.state(&key), State::Notified);
@@ -133,16 +149,16 @@ fn notify_all_notifies_the_line_in_order() {
 
 #[test]
 fn a_stored_waker_is_replaced_and_handed_back() {
-  let old = task(0);
-  let new = task(1);
+  let tasks = Tasks::new(2);
   let mut waiters = Waiters::new();
-  let key = waiters.insert(old.clone());
-  assert!(waiters.will_wake(&key, &old));
-  assert!(!waiters.will_wake(&key, &new));
-  let replaced = waiters.set_waker(&key, new.clone()).unwrap();
-  assert!(replaced.will_wake(&old));
-  assert!(waiters.will_wake(&key, &new));
+  let key = waiters.insert(tasks.waker(0));
+  assert!(
+    !waiters.will_wake(&key, &tasks.waker(1)),
+    "another task's waker never will-wakes"
+  );
+  let replaced = waiters.set_waker(&key, tasks.waker(1)).unwrap();
+  assert_eq!(tasks.which(&replaced), 0);
   let (state, stored) = waiters.remove(key);
   assert_eq!(state, State::Queued);
-  assert!(stored.unwrap().will_wake(&new));
+  assert_eq!(tasks.which(&stored.unwrap()), 1);
 }
