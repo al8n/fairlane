@@ -450,14 +450,22 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   }
 
   /// The last receiver gone closes the channel and lets go of every queued item, each dropped
-  /// under its own catch, so that one destructor that panics does not leak the rest. What the
-  /// close wakes is woken once the items are let go.
+  /// under its own catch, so that one destructor that panics does not leak the rest.
+  ///
+  /// What the close wakes is woken first, before any item's destructor runs: a destructor may wait
+  /// for a thread that waits on this channel, such as a producer it joins, and that thread returns
+  /// only once it is woken. A waker's panic is held until every item and every caught panic is
+  /// disposed of, and raised then.
   pub(crate) fn drop_receiver(&self) {
     if self.receivers.fetch_sub(1, Ordering::AcqRel) != 1 {
       return;
     }
     let mut wakers = Vec::new();
     self.shut(&mut wakers);
+    let mut wakes = Wakes::new();
+    for waker in wakers {
+      wakes.wake(Some(waker));
+    }
     let mut ahead = Vec::new();
     if let Some(choice) = &self.choice {
       // A receive in progress holds a `Receiver`, so no policy can drop the last one from inside
@@ -477,7 +485,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     // emptied every line, so a room given back here grants no reserve.
     let mut payloads = Vec::new();
     for (index, item) in ahead {
-      wakers.extend(self.lanes[index].release());
+      wakes.wake(self.lanes[index].release());
       contain(item, &mut payloads);
     }
     for state in self.lanes.iter() {
@@ -485,7 +493,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
         if state.lookahead {
           state.taken.store(popped.ordinal + 1, Ordering::Relaxed);
         }
-        wakers.extend(state.release());
+        wakes.wake(state.release());
         contain(popped.item, &mut payloads);
       }
     }
@@ -494,7 +502,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     for payload in payloads {
       dispose(payload);
     }
-    wake_all(wakers);
+    wakes.finish();
   }
 }
 

@@ -327,6 +327,43 @@ fn a_batch_stops_where_its_sink_has_no_room() {
   );
 }
 
+/// The last receiver's drop wakes the reserves its close resolves before it drops any item: an
+/// item whose destructor joins a producer parked on the channel lets that producer return.
+#[test]
+fn a_disconnect_wakes_its_waiters_before_dropping_items() {
+  type Handle = StdArc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>>;
+
+  /// Joins the thread in its slot when it is dropped.
+  struct Joiner(Handle);
+
+  impl Drop for Joiner {
+    fn drop(&mut self) {
+      if let Some(handle) = self.0.lock().unwrap().take() {
+        handle.join().unwrap();
+      }
+    }
+  }
+
+  let slot: Handle = StdArc::default();
+  let (tx, rx) = bounded::<Joiner>(cap(1)).unwrap();
+  tx.try_send(Single, Joiner(slot.clone())).unwrap();
+  let producer = {
+    let tx = tx.clone();
+    std::thread::spawn(move || {
+      assert!(matches!(tx.reserve_blocking(Single), Err(Closed)));
+    })
+  };
+  while tx.snapshot().senders_waiting(Single) == 0 {
+    std::thread::yield_now();
+  }
+  *slot.lock().unwrap() = Some(producer);
+  drop(rx);
+  assert!(
+    slot.lock().unwrap().is_none(),
+    "the item joined the producer"
+  );
+}
+
 #[test]
 fn snapshot_reads_each_lane() {
   let (tx, rx) = bounded::<u32>(cap(4)).unwrap();
