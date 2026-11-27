@@ -60,6 +60,12 @@ name = "alloc_refusal"
 path = "tests/alloc_refusal.rs"
 harness = false
 
+# A process-wide panic hook, and no harness, so that no other test's panic reaches it.
+[[test]]
+name = "panic_hook"
+path = "tests/panic_hook.rs"
+harness = false
+
 [[test]]
 name = "derive_ui"
 path = "tests/derive_ui.rs"

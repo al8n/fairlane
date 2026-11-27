@@ -315,10 +315,18 @@ impl<L: Lane> Policy<L> for PassLimit<L> {
   #[inline]
   fn stamp(&self) {}
 
+  /// It runs under the channel's choice lock, so it raises no panic of its own: a lane whose
+  /// index is out of range, from a `Lane` that breaks its contract, is passed over as having no
+  /// limit.
   fn owed(&self, view: &LaneView<L, ()>) -> Option<L> {
     let mut owed: Option<(L, u64)> = None;
     for lane in view.lanes() {
-      let Some(limit) = self.limit(lane) else {
+      let Some(limit) = self
+        .limits
+        .as_slice()
+        .get(lane.index())
+        .and_then(|limit| NonZeroU32::new(limit.load(Ordering::Relaxed)))
+      else {
         continue;
       };
       let Some(excess) = view.passed_over(lane).checked_sub(u64::from(limit.get())) else {
@@ -478,7 +486,16 @@ impl<L: Lane, C: Clock> Policy<L> for Elapsed<L, C> {
     let now = view.now();
     let mut owed: Option<(L, u64)> = None;
     for lane in view.lanes() {
-      let max_wait = self.max_waits.get(lane).threshold();
+      // Under the choice lock, no panic of its own: a lane whose index is out of range, from a
+      // `Lane` that breaks its contract, is passed over as having no wait.
+      let Some(max_wait) = self
+        .max_waits
+        .as_slice()
+        .get(lane.index())
+        .map(MaxWait::threshold)
+      else {
+        continue;
+      };
       if max_wait == NO_WAIT {
         continue;
       }
