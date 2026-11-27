@@ -599,9 +599,9 @@ impl<T, L: Lane, Y: Policy<L>> Receiver<T, L, Y> {
   ///
   /// # Panics
   ///
-  /// - A `Waker` must not panic, block, or call into a channel (the crate's documentation, "Wakers,
-  ///   policies and items"): a channel has no executor, and every wake runs on the caller's
-  ///   thread. If one this receive wakes panics anyway, after the item was taken, the panic unwinds
+  /// - A `Waker` must not panic, block on the channel or wait for another party's progress
+  ///   through it, or call into a channel (the crate's documentation, "Wakers, policies and
+  ///   items"): a channel has no executor, and every wake runs on the caller's thread. If one this receive wakes panics anyway, after the item was taken, the panic unwinds
   ///   out of this call and the item is dropped with it; no room is lost, and every other wake
   ///   still runs. [`recv_many`](Self::recv_many) keeps such an item in its `into`.
   /// - Where the policy panics, the panic unwinds out of this call before any item is taken.

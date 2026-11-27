@@ -43,9 +43,9 @@ impl<'a, T, L: Lane, Y: Policy<L>> Permit<'a, T, L, Y> {
   ///
   /// - Where the policy's `stamp` panics, before the commit, the room is given back, and then the
   ///   item is dropped by the unwind.
-  /// - A `Waker` must not panic, block, or call into a channel (the crate's documentation,
-  ///   "Wakers, policies and items"): a channel has no executor, and every wake runs on the
-  ///   caller's thread. If one this send wakes panics anyway, the panic unwinds out of this call:
+  /// - A `Waker` must not panic, block on the channel or wait for another party's progress
+  ///   through it, or call into a channel (the crate's documentation, "Wakers, policies and
+  ///   items"): a channel has no executor, and every wake runs on the caller's thread. If one this send wakes panics anyway, the panic unwinds out of this call:
   ///   after the item is committed, or, where the lane has spent its positions and closes, with the
   ///   item it was handing back dropped.
   ///
