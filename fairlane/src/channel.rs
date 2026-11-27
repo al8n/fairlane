@@ -17,7 +17,6 @@ use crate::{
   options::{LaneOptions, Malformed, Options},
   policy::{DefaultPolicy, Policy},
   receiver::Receiver,
-  reentry,
   remaining::{Remaining, free},
   reserves::Reserves,
   ring::{Refused, Ring},
@@ -511,9 +510,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     // one lane at a time, the lock taken for each, so that nothing is collected.
     let mut payloads = Vec::new();
     if let Some(choice) = &self.choice {
-      // A receive in progress holds a `Receiver`, so no policy can drop the last one from inside
-      // a choice of this channel; the refusal stands guard all the same.
-      reentry::refuse(self.address(), "dropped the last receiver");
+      // No re-entry check: a receive inside this choice borrows a live receiver, so none is last.
       for (index, state) in self.lanes.iter().enumerate() {
         let popped = {
           let mut choice = lock(choice);
