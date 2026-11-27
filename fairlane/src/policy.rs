@@ -37,8 +37,9 @@ pub const DEFAULT_MAX_WAIT: Duration = Duration::from_secs(2);
 ///   or a reserve of it that must wait, made on this thread inside its choice, panics with the
 ///   cause. The rest are not checked, and are as forbidden.
 ///
-/// A policy that breaks this contract by panicking loses no item and no room: the receive or the
-/// send unwinds, and what the receive had taken is the caller's.
+/// A policy that breaks this contract by panicking loses no room: the receive or the send unwinds.
+/// What a receive had taken is the caller's; the item a send was given by value may be dropped by
+/// the unwind, after its room is given back.
 ///
 /// The lanes of one view are read at different instants, one after another, so a view is not one
 /// atomic reading of the channel.

@@ -356,3 +356,41 @@ fn a_policy_that_drives_a_queued_reserve_is_refused() {
   assert_eq!(rx.try_recv().unwrap().unwrap().lane(), Three::B);
   release(&tx);
 }
+
+/// A `stamp` that panics while a sender waits for the permit's room gives the room back, and grants
+/// it to that sender, before the item is dropped: a destructor that joins the sender ends.
+#[test]
+fn a_stamp_that_panics_refunds_before_the_item_drops() {
+  type Handle = StdArc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>>;
+
+  /// Joins the thread in its slot when it is dropped.
+  struct Joiner(Handle);
+
+  impl Drop for Joiner {
+    fn drop(&mut self) {
+      if let Some(handle) = self.0.lock().unwrap().take() {
+        handle.join().unwrap();
+      }
+    }
+  }
+
+  let options = Options::from_fn(|_| LaneOptions::new(cap(1)));
+  let (tx, _rx) = channel_with::<Joiner, Three, Stamping>(options, Stamping::default()).unwrap();
+  let permit = tx.try_reserve(Three::B).unwrap();
+  let producer = {
+    let tx = tx.clone();
+    std::thread::spawn(move || drop(tx.reserve_blocking(Three::B).unwrap()))
+  };
+  while tx.snapshot().senders_waiting(Three::B) == 0 {
+    std::thread::yield_now();
+  }
+  let slot: Handle = StdArc::default();
+  *slot.lock().unwrap() = Some(producer);
+  let item = Joiner(slot.clone());
+  tx.policy().armed.store(true, Ordering::SeqCst);
+  let sent = catch_unwind(AssertUnwindSafe(move || permit.send(item)));
+  tx.policy().armed.store(false, Ordering::SeqCst);
+  assert!(sent.is_err(), "the stamp panicked");
+  assert!(slot.lock().unwrap().is_none(), "the item joined the sender");
+  assert_eq!(tx.snapshot().senders_waiting(Three::B), 0);
+}

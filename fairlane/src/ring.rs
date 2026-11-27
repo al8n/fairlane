@@ -208,6 +208,14 @@ impl<T, S: Copy> Ring<T, S> {
     Ok(position)
   }
 
+  /// Whether a push now would take a stamp: the ring keeps stamps, and its positions are open. A
+  /// push that comes after an answer of `false` calls no `stamp`: the mark is permanent, and the
+  /// push's own read of the tail sees at least as far as this one.
+  #[inline]
+  pub(crate) fn takes_stamp(&self) -> bool {
+    self.stamps.is_some() && self.tail.load(Ordering::Relaxed) <= LAST
+  }
+
   /// Why a push that read `tail` claims nothing. A tail at `LAST + 1`, marked or not, has spent
   /// every position; the push sets the mark, where no close has, so that every later push and the
   /// lane's end read it.

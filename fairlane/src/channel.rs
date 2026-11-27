@@ -266,8 +266,16 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   /// also where the policy's `stamp` unwinds before the commit.
   pub(crate) fn commit(&self, index: usize, item: T) -> Result<(), T> {
     let state = self.lane_at(index);
+    // Declared after `item`, so that an unwind out of `stamp` gives the room back before the item
+    // is dropped: a destructor that waits for a sender this room is granted to can then end.
     let refund = Refund(state);
-    match state.ring.push(item, || self.policy.stamp()) {
+    // Taken here, before the item moves into the push, for the same reason. The push calls its
+    // closure only where this found the ring taking stamps, so its fallback never runs.
+    let stamp = state.ring.takes_stamp().then(|| self.policy.stamp());
+    match state
+      .ring
+      .push(item, move || stamp.unwrap_or_else(|| self.policy.stamp()))
+    {
       Ok(_) => {
         // The unit is the item's room now, and the receiver's waker runs after this.
         mem::forget(refund);
