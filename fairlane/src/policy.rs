@@ -134,7 +134,9 @@ impl<L: Lane, S: Copy> LaneView<L, S> {
     self.reading(lane).map_or(0, |reading| reading.queued)
   }
 
-  /// The stamp of `lane`'s oldest item, where the view has one.
+  /// The stamp of `lane`'s oldest item, where the view has one. The channel's views have one for
+  /// every lane in them; for a zero-sized stamp it is the one value there is, whether the policy is
+  /// asked directly or through [`FirstOf`] or `Either`.
   #[inline]
   pub fn oldest(&self, lane: L) -> Option<S> {
     self.reading(lane).and_then(|reading| reading.oldest)

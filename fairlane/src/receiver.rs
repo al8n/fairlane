@@ -298,10 +298,18 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
                 .committed()
                 .saturating_sub(state.ring.received())
                 .saturating_add(u64::from(ahead.is_some()));
+              // A lane in the view holds an item. A zero-sized stamp is not looked ahead at,
+              // since it records nothing: its one value, `now`, is the oldest item's, as a
+              // projection of the same policy through a larger stamp reads it.
+              let oldest = if size_of::<Y::Stamp>() == 0 {
+                Some(now)
+              } else {
+                ahead.and_then(|popped| popped.stamp)
+              };
               lane_view = lane_view.with_index(
                 index,
                 usize::try_from(queued).unwrap_or(usize::MAX),
-                ahead.and_then(|popped| popped.stamp),
+                oldest,
                 *choice.passed_over.at(index),
               );
             }

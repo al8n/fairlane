@@ -9,7 +9,7 @@ use std::panic::catch_unwind;
 
 use super::*;
 use crate::{
-  LaneView, PassLimit, Policy, Quota, Received, Strict,
+  FirstOf, LaneView, PassLimit, Policy, Quota, Received, Strict,
   lane::Lane,
   testing::{Faults, Three},
 };
@@ -517,4 +517,71 @@ fn an_interrupted_registration_is_made_again() {
   tx.try_send(Three::C, 5).unwrap();
   assert!(probe.take(), "the commit to lane C woke the receive");
   assert!(matches!(poll_with(&mut recv, &waker), Poll::Ready(Ok(_))));
+}
+
+/// A policy with a zero-sized stamp that owes lane B wherever the view shows B's oldest stamp.
+#[derive(Debug, Clone, Copy, Default)]
+struct Peeks;
+
+impl Policy<Three> for Peeks {
+  type Stamp = ();
+
+  fn stamp(&self) {}
+
+  fn owed(&self, view: &LaneView<Three, ()>) -> Option<Three> {
+    view.oldest(Three::B).map(|()| Three::B)
+  }
+}
+
+/// A policy with a stamp of eight bytes that never owes.
+#[derive(Debug, Clone, Copy, Default)]
+struct Abstains;
+
+impl Policy<Three> for Abstains {
+  type Stamp = u64;
+
+  fn stamp(&self) -> u64 {
+    0
+  }
+
+  fn owed(&self, _: &LaneView<Three, u64>) -> Option<Three> {
+    None
+  }
+}
+
+/// The lane a fresh channel of `policy`, with an item in lanes A and B, serves first.
+fn first_served<Y: Policy<Three>>(policy: Y) -> Three {
+  let (tx, rx) = channel_with::<u32, Three, Y>(three(1, false), policy).unwrap();
+  tx.try_send(Three::A, 1).unwrap();
+  tx.try_send(Three::B, 2).unwrap();
+  rx.try_recv().unwrap().unwrap().lane()
+}
+
+/// A zero-sized stamp is as visible to its policy asked directly as through a projection of a
+/// larger stamp: a lane that holds an item shows its oldest stamp either way.
+#[test]
+fn a_zero_sized_stamp_reads_the_same_directly_and_through_first_of() {
+  assert_eq!(first_served(Peeks), Three::B, "B's oldest stamp is shown");
+  assert_eq!(first_served(FirstOf::new(Peeks, Abstains)), Three::B);
+  assert_eq!(first_served(FirstOf::new(Abstains, Peeks)), Three::B);
+}
+
+/// `Either::Left(P)` chooses as `P` does.
+#[cfg(feature = "either")]
+#[test]
+fn either_left_chooses_as_its_policy_does() {
+  use either::Either;
+
+  assert_eq!(
+    first_served(Either::<Peeks, Peeks>::Left(Peeks)),
+    first_served(Peeks)
+  );
+  assert_eq!(
+    first_served(Either::<Strict, Peeks>::Left(Strict)),
+    first_served(Strict)
+  );
+  assert_eq!(
+    first_served(Either::<Abstains, Peeks>::Right(Peeks)),
+    first_served(Peeks)
+  );
 }
