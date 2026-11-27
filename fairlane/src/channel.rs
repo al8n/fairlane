@@ -24,7 +24,7 @@ use crate::{
   sender::Sender,
   snapshot::{Reading, Snapshot},
   sync::{Arc, AtomicBool, AtomicU64, AtomicUsize, Mutex, Ordering, lock},
-  waiters::{Key, State, Waiters},
+  waiters::{self, Key, State, Waiters},
   wake::{Wakes, dispose, wake, wake_all},
 };
 
@@ -365,6 +365,11 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
           None if self.is_closed() => break Poll::Ready(()),
           None => {
             if let Some(new) = fresh.take() {
+              if let Err(error) = closers.make_room() {
+                drop(closers);
+                drop(new);
+                waiters::full(error);
+              }
               *key = Some(closers.insert(new));
               break Poll::Pending;
             }

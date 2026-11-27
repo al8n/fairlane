@@ -26,7 +26,7 @@ use crate::{
   reentry,
   remaining::{Back, CLOSED, Join, Refusal, Remaining, back, closed, join, left},
   sync::{AtomicUsize, Mutex, Ordering, lock},
-  waiters::{Key, State, Waiters},
+  waiters::{self, Key, State, Waiters},
   wake::{Spare, Wakes},
 };
 
@@ -95,6 +95,12 @@ impl Reserves {
     spare: &mut Spare,
   ) -> Poll<Result<(), Closed>> {
     let mut line = lock(&self.line);
+    // Before the word changes, and before the waker is handed over.
+    if let Err(error) = line.make_room() {
+      drop(line);
+      drop(fresh);
+      waiters::full(error);
+    }
     let mut current = remaining.load();
     loop {
       let step = join(current);

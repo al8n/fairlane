@@ -21,7 +21,7 @@ use core::task::Waker;
 
 use crate::{
   sync::{AtomicUsize, Mutex, Ordering, lock, pair_fence},
-  waiters::{Key, State, Waiters},
+  waiters::{self, Key, State, Waiters},
   wake::Wakes,
 };
 
@@ -43,6 +43,11 @@ impl Arrivals {
   pub(crate) fn listen(&self, waker: Waker) -> Key {
     let key = {
       let mut line = lock(&self.line);
+      if let Err(error) = line.make_room() {
+        drop(line);
+        drop(waker);
+        waiters::full(error);
+      }
       let key = line.insert(waker);
       self.count.fetch_add(1, Ordering::SeqCst);
       key

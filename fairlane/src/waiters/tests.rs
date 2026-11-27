@@ -60,12 +60,36 @@ impl Tasks {
   }
 }
 
+/// Puts `waker` in line as the queues' owners do: room first, then the waiter.
+fn insert(waiters: &mut Waiters, waker: Waker) -> Key {
+  waiters.make_room().unwrap();
+  waiters.insert(waker)
+}
+
+#[test]
+fn room_is_made_only_where_no_freed_place_is_left() {
+  let tasks = Tasks::new(2);
+  let mut waiters = Waiters::new();
+  let first = insert(&mut waiters, tasks.waker(0));
+  let _ = waiters.remove(first);
+  let capacity = waiters.slots.capacity();
+  waiters.make_room().unwrap();
+  assert_eq!(
+    waiters.slots.capacity(),
+    capacity,
+    "a freed place needs no room"
+  );
+  let second = insert(&mut waiters, tasks.waker(1));
+  assert_eq!(waiters.slots.len(), 1);
+  let _ = waiters.remove(second);
+}
+
 #[test]
 fn notifies_oldest_first() {
   let tasks = Tasks::new(3);
   let mut waiters = Waiters::new();
   let keys: Vec<Key> = (0..3)
-    .map(|task| waiters.insert(tasks.waker(task)))
+    .map(|task| insert(&mut waiters, tasks.waker(task)))
     .collect();
   assert_eq!(waiters.queued(), 3);
   for (task, key) in keys.iter().enumerate() {
@@ -85,7 +109,7 @@ fn a_waiter_leaves_from_the_middle_of_the_line() {
   let tasks = Tasks::new(3);
   let mut waiters = Waiters::new();
   let mut keys: Vec<Option<Key>> = (0..3)
-    .map(|task| Some(waiters.insert(tasks.waker(task))))
+    .map(|task| Some(insert(&mut waiters, tasks.waker(task))))
     .collect();
   let (state, waker) = waiters.remove(keys[1].take().unwrap());
   assert_eq!(state, State::Queued);
@@ -100,10 +124,10 @@ fn a_waiter_leaves_from_the_middle_of_the_line() {
 fn a_freed_place_is_used_again_and_goes_to_the_back() {
   let tasks = Tasks::new(3);
   let mut waiters = Waiters::new();
-  let first = waiters.insert(tasks.waker(0));
-  let second = waiters.insert(tasks.waker(1));
+  let first = insert(&mut waiters, tasks.waker(0));
+  let second = insert(&mut waiters, tasks.waker(1));
   let _ = waiters.remove(first);
-  let third = waiters.insert(tasks.waker(2));
+  let third = insert(&mut waiters, tasks.waker(2));
   assert_eq!(waiters.slots.len(), 2, "the freed place is used again");
   assert_eq!(tasks.notify(&mut waiters), 1);
   assert_eq!(tasks.notify(&mut waiters), 2);
@@ -115,7 +139,7 @@ fn close_all_closes_every_waiter_and_counts_the_notified() {
   let tasks = Tasks::new(4);
   let mut waiters = Waiters::new();
   let keys: Vec<Key> = (0..4)
-    .map(|task| waiters.insert(tasks.waker(task)))
+    .map(|task| insert(&mut waiters, tasks.waker(task)))
     .collect();
   let _ = waiters.notify_oldest();
   let mut woken = Vec::new();
@@ -134,7 +158,7 @@ fn notify_all_notifies_the_line_in_order() {
   let tasks = Tasks::new(3);
   let mut waiters = Waiters::new();
   let keys: Vec<Key> = (0..3)
-    .map(|task| waiters.insert(tasks.waker(task)))
+    .map(|task| insert(&mut waiters, tasks.waker(task)))
     .collect();
   let mut woken = Vec::new();
   waiters.notify_all(&mut woken);
@@ -151,7 +175,7 @@ fn notify_all_notifies_the_line_in_order() {
 fn a_stored_waker_is_replaced_and_handed_back() {
   let tasks = Tasks::new(2);
   let mut waiters = Waiters::new();
-  let key = waiters.insert(tasks.waker(0));
+  let key = insert(&mut waiters, tasks.waker(0));
   assert!(
     !waiters.will_wake(&key, &tasks.waker(1)),
     "another task's waker never will-wakes"

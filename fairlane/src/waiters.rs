@@ -11,6 +11,7 @@
 //!   the most places ever taken at once: as many as there were waiters at one time.
 
 use core::task::Waker;
+use std::collections::TryReserveError;
 
 /// No place.
 const NIL: usize = usize::MAX;
@@ -90,8 +91,25 @@ impl Waiters {
     self.notified
   }
 
-  /// Puts a waiter at the back of the line, with its waker.
+  /// Makes room for one more waiter, where no freed place is left, before a waker is handed over
+  /// and before the line's owner changes any state: a failure is then the caller's to report with
+  /// nothing changed, its lock let go first, so that the waker it keeps is dropped outside the
+  /// lock.
+  pub(crate) fn make_room(&mut self) -> Result<(), TryReserveError> {
+    if self.vacant == NIL {
+      self.slots.try_reserve(1)
+    } else {
+      Ok(())
+    }
+  }
+
+  /// Puts a waiter at the back of the line, with its waker, in the room
+  /// [`make_room`](Self::make_room) made: it allocates nothing and cannot fail.
   pub(crate) fn insert(&mut self, waker: Waker) -> Key {
+    debug_assert!(
+      self.vacant != NIL || self.slots.len() < self.slots.capacity(),
+      "room was made first"
+    );
     let entry = Entry {
       state: State::Queued,
       waker: Some(waker),
@@ -254,6 +272,14 @@ impl Waiters {
       Slot::Vacant(_) => unreachable!("a key names a taken place"),
     }
   }
+}
+
+/// The panic of a line that cannot grow, raised by its owner once it has let its lock and the
+/// waker go.
+#[cold]
+#[inline(never)]
+pub(crate) fn full(error: TryReserveError) -> ! {
+  panic!("a channel's waiter line cannot take one more waiter: {error}")
 }
 
 /// A fresh queue's identity, for the debug check that a key goes back to its own queue. A plain
