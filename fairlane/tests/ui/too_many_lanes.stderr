@@ -3,5 +3,3 @@ error[E0080]: evaluation panicked: `TooMany` has 257 lanes, more than a fairlane
   |
 1 | #[derive(fairlane::Lane)]
   |          ^^^^^^^^^^^^^^ evaluation of `_` failed here
-  |
-  = note: this error originates in the macro `::core::assert` which comes from the expansion of the derive macro `fairlane::Lane` (in Nightly builds, run with -Z macro-backtrace for more info)

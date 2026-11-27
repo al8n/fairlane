@@ -1,4 +1,5 @@
 #[derive(fairlane::Lane)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TooMany {
   V0,
   V1,
