@@ -7,7 +7,11 @@ use std::{
 use crate::{
   Closed, Receiver, Sender, Single, TryReserveError,
   channel::bounded,
+  remaining::{Remaining, closed},
+  reserves::{Reserves, Wait},
+  sync::lock,
   testing::{Faults, Probe, poll_with},
+  wake::Spare,
 };
 
 fn channel_of_one() -> (Sender<u32>, Receiver<u32>) {
@@ -236,4 +240,28 @@ fn a_waker_may_drop_a_reserve_of_its_own_lane() {
   assert_eq!(tx.snapshot().senders_waiting(Single), 1);
   assert!(matches!(poll_with(&mut woken, &waker), Poll::Ready(Ok(_))));
   assert_eq!(tx.snapshot().senders_waiting(Single), 0);
+}
+
+#[test]
+fn a_reserve_that_does_not_join_the_line_makes_no_room_in_it() {
+  let reserves = Reserves::new();
+  let (_, waker) = Probe::new();
+  let shut = Remaining::new(0);
+  shut.update(|current| closed(current, 0));
+  let came_back = Remaining::new(1);
+  for (remaining, expected) in [(&shut, Err(Closed)), (&came_back, Ok(()))] {
+    let mut wait = Wait::Start;
+    let mut spare = Spare::new();
+    let verdict = reserves.begin(remaining, &mut wait, waker.clone(), &mut spare);
+    assert!(
+      matches!(verdict, Poll::Ready(answer) if answer == expected),
+      "a closed lane answers `Closed`, and a unit that came back is taken"
+    );
+    assert!(matches!(wait, Wait::Done));
+  }
+  assert_eq!(
+    lock(&reserves.line).room(),
+    0,
+    "no place was made for either"
+  );
 }

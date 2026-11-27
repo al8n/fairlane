@@ -120,6 +120,12 @@ impl Waiters {
     self.queued
   }
 
+  /// The places the vector holds room for, taken or not.
+  #[cfg(test)]
+  pub(crate) fn room(&self) -> usize {
+    self.slots.capacity()
+  }
+
   /// Waiters notified, and not yet removed by their holders.
   #[inline]
   pub(crate) fn notified(&self) -> usize {

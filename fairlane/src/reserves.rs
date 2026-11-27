@@ -95,14 +95,10 @@ impl Reserves {
     spare: &mut Spare,
   ) -> Poll<Result<(), Closed>> {
     let mut line = lock(&self.line);
-    // Before the word changes, and before the waker is handed over.
-    if let Err(error) = line.make_room() {
-      drop(line);
-      drop(fresh);
-      waiters::full(error);
-    }
     let mut current = remaining.load();
     loop {
+      // Classified first, each time round: a closed lane or a unit that came back needs no place
+      // in line, so only a reserve that joins it can fail to find room.
       let step = join(current);
       let next = match step {
         Join::Closed => {
@@ -110,7 +106,16 @@ impl Reserves {
           spare.keep(Some(fresh));
           return done(wait, Err(Closed));
         }
-        Join::Take(next) | Join::Queue(next) => next,
+        Join::Take(next) => next,
+        Join::Queue(next) => {
+          // Before the word changes, and before the waker is handed over.
+          if let Err(error) = line.make_room() {
+            drop(line);
+            drop(fresh);
+            waiters::full(error);
+          }
+          next
+        }
       };
       match remaining.replace(current, next) {
         Ok(()) if matches!(step, Join::Take(_)) => {
