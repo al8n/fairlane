@@ -259,6 +259,74 @@ fn disconnect_survives_a_payload_whose_drop_panics() {
   assert_eq!(tx.snapshot().received(Three::C), 2);
 }
 
+/// A sink with room for a set number of items: a batch's `Vec` that cannot grow.
+struct Cramped<L: Lane> {
+  items: Vec<crate::Received<u32, L>>,
+  room: usize,
+}
+
+impl<L: Lane> crate::receiver::Sink<u32, L> for Cramped<L> {
+  fn room(&mut self, _: bool) -> bool {
+    self.items.len() < self.room
+  }
+
+  fn put(&mut self, received: crate::Received<u32, L>) {
+    self.items.push(received);
+  }
+}
+
+/// A batch whose sink has no room left stops before it takes another item: every item it took is
+/// the sink's, the rest stay queued, and every room it took is given back, to a waiting reserve
+/// first.
+#[test]
+fn a_batch_stops_where_its_sink_has_no_room() {
+  use crate::{receiver::Took, testing::Three};
+
+  let (tx, _rx) = bounded::<u32>(cap(2)).unwrap();
+  tx.try_send(Single, 1).unwrap();
+  tx.try_send(Single, 2).unwrap();
+  let (probe, waker) = Probe::new();
+  let mut waiting = tx.reserve(Single);
+  assert!(poll_with(&mut waiting, &waker).is_pending());
+  let mut sink = Cramped {
+    items: Vec::new(),
+    room: 1,
+  };
+  assert!(matches!(
+    tx.shared().take(&Quota::up_to(8), &mut sink),
+    Took::Items(held) if held.get() == 1
+  ));
+  assert_eq!(sink.items.len(), 1);
+  assert_eq!(
+    tx.snapshot().queued(Single),
+    1,
+    "the second item stays queued"
+  );
+  assert!(
+    probe.take(),
+    "the taken item's room went to the waiting reserve"
+  );
+
+  let options = Options::from_fn(|_| LaneOptions::new(cap(4)));
+  let (tx, _rx) = channel::<u32, Three>(options).unwrap();
+  for item in 0..3 {
+    tx.try_send(Three::B, item).unwrap();
+  }
+  let mut sink = Cramped {
+    items: Vec::new(),
+    room: 2,
+  };
+  assert!(matches!(
+    tx.shared().take(&Quota::up_to(8), &mut sink),
+    Took::Items(held) if held.get() == 2
+  ));
+  let snapshot = tx.snapshot();
+  assert_eq!(
+    (snapshot.queued(Three::B), snapshot.remaining(Three::B)),
+    (1, 3)
+  );
+}
+
 #[test]
 fn snapshot_reads_each_lane() {
   let (tx, rx) = bounded::<u32>(cap(4)).unwrap();

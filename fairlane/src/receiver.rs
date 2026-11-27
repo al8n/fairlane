@@ -114,10 +114,55 @@ pub(crate) enum Took {
   Ended,
 }
 
+/// Where a receive puts the items it takes.
+///
+/// An item leaves its lane only into room the sink has made for it, so that putting it there runs
+/// no user code and cannot fail: between the pop and the sink, nothing can drop it.
+pub(crate) trait Sink<T, L: Lane> {
+  /// Makes room for one more item, before it is taken. False where there is none: the batch stops
+  /// there, and keeps what it holds. `first` is true while the batch holds nothing.
+  fn room(&mut self, first: bool) -> bool;
+
+  /// Puts an item into the room [`room`](Self::room) made.
+  fn put(&mut self, received: Received<T, L>);
+}
+
+/// A batch's `Vec`, grown one item at a time: reserving a whole quota up front would refuse a
+/// large quota the batch never fills.
+impl<T, L: Lane> Sink<T, L> for Vec<Received<T, L>> {
+  /// Room for a batch's first item is made as `Vec::push` makes it, and fails as it does, by a
+  /// panic or an abort: before any item is taken, so nothing is lost. Where a later item finds no
+  /// room, the batch stops and keeps what it holds.
+  fn room(&mut self, first: bool) -> bool {
+    if first {
+      self.reserve(1);
+      true
+    } else {
+      self.try_reserve(1).is_ok()
+    }
+  }
+
+  fn put(&mut self, received: Received<T, L>) {
+    debug_assert!(self.len() < self.capacity(), "room was made first");
+    self.push(received);
+  }
+}
+
+/// A single receive's result.
+impl<T, L: Lane> Sink<T, L> for Option<Received<T, L>> {
+  fn room(&mut self, _: bool) -> bool {
+    self.is_none()
+  }
+
+  fn put(&mut self, received: Received<T, L>) {
+    *self = Some(received);
+  }
+}
+
 impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   /// One receive under `quota`, without waiting: every item it takes goes to `sink` at once, before
   /// the next choice, so an unwind out of a policy never drops an item that was taken.
-  pub(crate) fn take(&self, quota: &Quota<L>, sink: &mut impl FnMut(Received<T, L>)) -> Took {
+  pub(crate) fn take(&self, quota: &Quota<L>, sink: &mut impl Sink<T, L>) -> Took {
     match self.choice() {
       None => self.take_one_lane(quota, sink),
       Some(choice) => self.take_lanes(choice, quota, sink),
@@ -125,18 +170,21 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   }
 
   /// A channel of one lane: pops, and no lock.
-  fn take_one_lane(&self, quota: &Quota<L>, sink: &mut impl FnMut(Received<T, L>)) -> Took {
+  fn take_one_lane(&self, quota: &Quota<L>, sink: &mut impl Sink<T, L>) -> Took {
     let state = self.lane_at(0);
     let lane_limit = quota.limit_at(0);
     let mut held = 0;
     while fits(held, quota.limit(), lane_limit) {
+      if !sink.room(held == 0) {
+        break;
+      }
       let Some(popped) = state.ring.pop() else {
         break;
       };
       // The room goes back first, and the item to the sink; only then does the waker of a
       // reserve the room was granted to run, so a waker that panics costs no item.
       let granted = state.release();
-      sink(Received {
+      sink.put(Received {
         item: popped.item,
         lane: self.name(0),
         ordinal: popped.ordinal,
@@ -180,7 +228,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     &self,
     choice: &Mutex<Choice<T, L, Y::Stamp>>,
     quota: &Quota<L>,
-    sink: &mut impl FnMut(Received<T, L>),
+    sink: &mut impl Sink<T, L>,
   ) -> Took {
     let count = lane_count::<L>();
     // Declared first, so that it is dropped last: unlocked and unmarked.
@@ -258,7 +306,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
       };
 
       let lane_limit = quota.limit_at(chosen);
-      if !fits(held, limit, lane_limit) {
+      if !fits(held, limit, lane_limit) || !sink.room(held == 0) {
         break;
       }
       let state = self.lane_at(chosen);
@@ -287,7 +335,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
         }
         passed_over[chosen] = 0;
       }
-      sink(Received {
+      sink.put(Received {
         item: popped.item,
         lane: self.name(chosen),
         ordinal: popped.ordinal,
@@ -426,10 +474,7 @@ impl<T, L: Lane, Y: Policy<L>> Receiver<T, L, Y> {
     if !quota.admits_any() {
       return Err(RecvManyError::EmptyQuota);
     }
-    match self
-      .shared
-      .take(&quota, &mut |received| into.push(received))
-    {
+    match self.shared.take(&quota, into) {
       Took::Items(held) => {
         self.shared.chain(&quota);
         Ok(held.get())
@@ -497,10 +542,7 @@ impl<T, L: Lane, Y: Policy<L>> Receiver<T, L, Y> {
   pub fn try_recv(&self) -> Result<Option<Received<T, L>>, Ended> {
     let quota = Quota::up_to(1);
     let mut slot = None;
-    match self
-      .shared
-      .take(&quota, &mut |received| slot = Some(received))
-    {
+    match self.shared.take(&quota, &mut slot) {
       Took::Items(_) => {
         self.shared.chain(&quota);
         Ok(slot)
@@ -642,7 +684,7 @@ impl<L: Lane> Arrival<L> {
     shared: &Shared<T, L, Y>,
     quota: &Quota<L>,
     cx: &mut Context<'_>,
-    sink: &mut impl FnMut(Received<T, L>),
+    sink: &mut impl Sink<T, L>,
   ) -> Poll<Result<NonZeroUsize, RecvManyError>> {
     if !quota.admits_any() {
       return Poll::Ready(Err(RecvManyError::EmptyQuota));
@@ -709,12 +751,9 @@ impl<T, L: Lane, Y: Policy<L>> Future for RecvMany<'_, T, L, Y> {
 
   fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
     let this = self.get_mut();
-    let into = &mut *this.into;
     this
       .wait
-      .poll(this.shared, &this.quota, cx, &mut |received| {
-        into.push(received)
-      })
+      .poll(this.shared, &this.quota, cx, &mut *this.into)
   }
 }
 
@@ -750,11 +789,7 @@ impl<T, L: Lane, Y: Policy<L>> Future for Recv<'_, T, L, Y> {
   fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
     let this = self.get_mut();
     let mut slot = None;
-    match this
-      .wait
-      .poll(this.shared, &this.quota, cx, &mut |received| {
-        slot = Some(received)
-      }) {
+    match this.wait.poll(this.shared, &this.quota, cx, &mut slot) {
       Poll::Pending => Poll::Pending,
       Poll::Ready(Ok(_)) => match slot {
         Some(received) => Poll::Ready(Ok(received)),
