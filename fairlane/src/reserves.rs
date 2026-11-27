@@ -52,6 +52,11 @@ impl Reserves {
     }
   }
 
+  /// Takes the line's lock once, at the channel's construction, so that no later lock allocates.
+  pub(crate) fn warm(&self) {
+    drop(lock(&self.line));
+  }
+
   /// Reserves that wait now.
   #[inline]
   pub(crate) fn parked(&self) -> usize {

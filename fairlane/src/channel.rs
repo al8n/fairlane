@@ -206,7 +206,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
         taken: AtomicU64::new(0),
       });
     }
-    Ok(Self {
+    let shared = Self {
       lanes: states.into_boxed_slice(),
       names: (0..count).map(lane_at::<L>).collect(),
       express,
@@ -217,7 +217,22 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
       closing: AtomicBool::new(false),
       closed: AtomicBool::new(false),
       closers: Mutex::new(Waiters::new()),
-    })
+    };
+    shared.warm();
+    Ok(shared)
+  }
+
+  /// Takes every lock once, before the channel is shared: std's `Mutex` may allocate its native
+  /// mutex at its first lock (pthread, on macOS), and then no later lock does.
+  fn warm(&self) {
+    for state in self.lanes.iter() {
+      state.reserves.warm();
+      state.arrivals.warm();
+    }
+    drop(lock(&self.closers));
+    if let Some(choice) = &self.choice {
+      drop(lock(choice));
+    }
   }
 
   /// The index of `lane`: one call into [`Lane::index`], checked against `L::N`. A door resolves

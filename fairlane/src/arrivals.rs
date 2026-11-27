@@ -38,6 +38,11 @@ impl Arrivals {
     }
   }
 
+  /// Takes the line's lock once, at the channel's construction, so that no later lock allocates.
+  pub(crate) fn warm(&self) {
+    drop(lock(&self.line));
+  }
+
   /// Joins the line with `waker`, a clone made before the lock, and counts itself. The receive
   /// looks again after this.
   pub(crate) fn listen(&self, waker: Waker) -> Key {
