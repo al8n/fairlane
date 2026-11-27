@@ -105,8 +105,9 @@ pub(crate) fn wake(waker: Option<Waker>) {
   }
 }
 
-/// How many wakers [`Staged`] keeps without allocating: a single receive needs one, and a batch of
-/// up to this many items allocates nothing for the reserves it grants room to.
+/// How many wakers [`Staged`] keeps without allocating: a single receive needs one, and a batch that
+/// takes fewer items allocates nothing for the reserves it grants room to. One that takes this many
+/// may try one pop more, and make that place, allocating, before it finds the lane empty.
 const STAGED_INLINE: usize = 8;
 
 /// The wakers of the reserves a batch grants room to, kept until the receive has taken every item,
@@ -115,8 +116,9 @@ const STAGED_INLINE: usize = 8;
 ///
 /// A place for each is made before the item that may produce it leaves its lane, so that keeping
 /// the waker once the item is out needs no memory. The first places are inline; the rest are in a
-/// `Vec`, grown one place at a time, beforehand, as std grows it, and only where a batch takes more
-/// items than the inline places.
+/// `Vec`, grown one place at a time, beforehand, as std grows it, where a batch makes more places
+/// than the inline ones: a batch that has taken as many items may grow it for one more pop that
+/// then finds nothing. A place a missed pop made is given back ([`unroom`](Self::unroom)).
 pub(crate) struct Staged {
   inline: [Option<Waker>; STAGED_INLINE],
   more: Vec<Waker>,

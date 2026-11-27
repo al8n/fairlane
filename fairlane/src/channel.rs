@@ -516,6 +516,10 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   /// The wakes this close resolves run before the destructors of the items it drops. A wake that a
   /// concurrent close took from its waiter's place first is that close's to deliver, and may run
   /// later; the item contract makes neither order one a destructor can wait on.
+  ///
+  /// A waker that panics is caught, so the other wakes still run. The first such panic is resumed
+  /// once every item is dropped, and a later one is dropped at once; where the thread is unwinding
+  /// already, the first is disposed of too ([`Wakes::finish`]).
   pub(crate) fn drop_receiver(&self) {
     if self.receivers.fetch_sub(1, Ordering::AcqRel) != 1 {
       return;

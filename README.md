@@ -148,7 +148,9 @@ the thread of the call that set it off.
   the items it lets go, and a refund can run beside an item's drop; a destructor that waits for a
   sender or a receiver of the channel may deadlock. A close runs the wakes it resolves before the
   destructors of the items it drops, but a wake that a concurrent close is delivering may run
-  later, so the order is no promise a destructor can wait on.
+  later, so the order is no promise a destructor can wait on. The last receiver drops the queued
+  items as a `Vec` does: if an item's destructor panics, the rest are still dropped, and their room
+  given back, while it unwinds, and a second panic aborts the process.
 - **A `Policy::Stamp` should be small,** a few words: a receive's view of the lanes holds one
   reading per lane, each with a stamp, on the stack.
 

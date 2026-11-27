@@ -11,7 +11,9 @@
          receive that is woken must be polled promptly, or dropped, since one left unpolled keeps \
          its notice and can delay the others, though it loses no item and no unit; a `Policy` \
          must not block or call into any channel; an item's `Drop` must not block on \
-         anyone who waits on the same channel. Fairlane allocates as std does: during a call, an \
+         anyone who waits on the same channel. The last receiver drops the queued items as a \
+         `Vec` does: if an item's destructor panics, the rest are still dropped and their room \
+         given back while it unwinds, and a second panic aborts the process. Fairlane allocates as std does: during a call, an \
          allocation failure aborts the process, as `Vec::push` does; at construction, a capacity \
          that cannot be laid out or allocated is refused as `Malformed::Capacity`."
 )]

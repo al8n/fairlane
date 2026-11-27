@@ -30,6 +30,10 @@ use crate::{
 /// a concurrent close is delivering may run later. No destructor may rely on either order: it must
 /// not block on anyone who waits on this channel (the crate's documentation, "Wakers, policies and
 /// items").
+///
+/// The last one drops the queued items as a `Vec` does: if an item's destructor panics, the panic
+/// unwinds out of the drop, and the rest are still dropped, and their room given back, while it
+/// unwinds; a second destructor that panics then aborts the process.
 pub struct Receiver<T, L: Lane = Single, Y: Policy<L> = DefaultPolicy<L>> {
   shared: Arc<Shared<T, L, Y>>,
 }
@@ -702,6 +706,9 @@ impl<T, L: Lane, Y: Policy<L>> Clone for Receiver<T, L, Y> {
 }
 
 impl<T, L: Lane, Y: Policy<L>> Drop for Receiver<T, L, Y> {
+  /// The last one closes the channel and drops what is queued, as a `Vec` drops its items: if a
+  /// destructor panics, the rest are still dropped, and their room given back, while it unwinds,
+  /// and a second panic aborts the process.
   #[inline]
   fn drop(&mut self) {
     self.shared.drop_receiver();
