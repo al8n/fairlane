@@ -24,10 +24,11 @@ pub fn choose<L: Lane, Y: Policy<L>>(view: &LaneView<L, Y::Stamp>, policy: &Y) -
 }
 
 /// After an item of `served` was taken: `served`'s passed-over count is zero, and every other lane
-/// of the view has one more. A lane outside the view keeps its count.
+/// of the view has one more. A lane outside the view keeps its count. A count stops at `u64::MAX`,
+/// 2⁶⁴ − 1 takes on, rather than wrap; see [`LaneView::passed_over`].
 #[inline]
 pub fn count<L: Lane, S: Copy>(
-  passed_over: &mut PerLane<u32, L>,
+  passed_over: &mut PerLane<u64, L>,
   served: L,
   view: &LaneView<L, S>,
 ) {
@@ -60,7 +61,7 @@ pub(crate) fn fits(held: usize, limit: usize, lane_limit: usize) -> bool {
 /// The lookahead is on the heap, one slot per lane by index, so that the shared state holds no
 /// item inline: a channel of large items is built without moving them through the stack.
 pub(crate) struct Choice<T, L: Lane, S> {
-  pub(crate) passed_over: PerLane<u32, L>,
+  pub(crate) passed_over: PerLane<u64, L>,
   pub(crate) ahead: Box<[Option<Popped<T, S>>]>,
 }
 

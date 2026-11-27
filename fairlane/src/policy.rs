@@ -72,7 +72,7 @@ pub struct LaneView<L: Lane, S> {
 struct Reading<S> {
   queued: usize,
   oldest: Option<S>,
-  passed_over: u32,
+  passed_over: u64,
 }
 
 impl<L: Lane, S: Copy> LaneView<L, S> {
@@ -89,7 +89,7 @@ impl<L: Lane, S: Copy> LaneView<L, S> {
   /// `passed_over` times since its last item was taken. A lane given twice keeps the second.
   #[must_use]
   #[inline]
-  pub fn with_lane(mut self, lane: L, queued: usize, oldest: Option<S>, passed_over: u32) -> Self {
+  pub fn with_lane(mut self, lane: L, queued: usize, oldest: Option<S>, passed_over: u64) -> Self {
     *self.readings.get_mut(lane) = Some(Reading {
       queued,
       oldest,
@@ -107,7 +107,7 @@ impl<L: Lane, S: Copy> LaneView<L, S> {
     index: usize,
     queued: usize,
     oldest: Option<S>,
-    passed_over: u32,
+    passed_over: u64,
   ) -> Self {
     self.readings.as_mut_slice()[index] = Some(Reading {
       queued,
@@ -142,8 +142,13 @@ impl<L: Lane, S: Copy> LaneView<L, S> {
 
   /// How many items of other lanes were taken since `lane`'s last one; 0 for a lane not in the
   /// view.
+  ///
+  /// A `u64`: each take moves a count by at most one, so a count reaches `u64::MAX` only after
+  /// 2⁶⁴ − 1 takes while its lane waits, over five centuries at one take a nanosecond, and every
+  /// threshold a [`PassLimit`] can hold, a `u32`, is passed with room to spare. The channel's count
+  /// stops at `u64::MAX` rather than wrap.
   #[inline]
-  pub fn passed_over(&self, lane: L) -> u32 {
+  pub fn passed_over(&self, lane: L) -> u64 {
     self.reading(lane).map_or(0, |reading| reading.passed_over)
   }
 
@@ -242,7 +247,8 @@ impl<L: Lane> Policy<L> for Strict {
 /// Its stamp is `()`.
 ///
 /// Where several lanes are owed, the one owed longest goes first: the largest count past its
-/// limit. A tie goes to the higher lane.
+/// limit, compared in full, so a lane at a limit of `u32::MAX` passed over once more is owed
+/// longer than a lane just at its own limit. A tie goes to the higher lane.
 ///
 /// The limits are live: [`set_limit`](Self::set_limit) takes effect at the next choice.
 pub struct PassLimit<L: Lane> {
@@ -308,12 +314,12 @@ impl<L: Lane> Policy<L> for PassLimit<L> {
   fn stamp(&self) {}
 
   fn owed(&self, view: &LaneView<L, ()>) -> Option<L> {
-    let mut owed: Option<(L, u32)> = None;
+    let mut owed: Option<(L, u64)> = None;
     for lane in view.lanes() {
       let Some(limit) = self.limit(lane) else {
         continue;
       };
-      let Some(excess) = view.passed_over(lane).checked_sub(limit.get()) else {
+      let Some(excess) = view.passed_over(lane).checked_sub(u64::from(limit.get())) else {
         continue;
       };
       if owed.is_none_or(|(_, longest)| excess > longest) {

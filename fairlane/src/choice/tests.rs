@@ -52,24 +52,60 @@ fn choose_finds_nothing_in_an_empty_view() {
 
 #[test]
 fn count_resets_the_served_lane() {
-  let mut passed = PerLane::<u32, Three>::from_fn(|_| 5);
+  let mut passed = PerLane::<u64, Three>::from_fn(|_| 5);
   count(&mut passed, Three::B, &view(&[Three::A, Three::B]));
   assert_eq!(passed.as_slice(), &[6, 0, 5]);
 }
 
 #[test]
 fn count_touches_only_the_view() {
-  let mut passed = PerLane::<u32, Three>::default();
+  let mut passed = PerLane::<u64, Three>::default();
   count(&mut passed, Three::A, &view(&[Three::A, Three::C]));
   assert_eq!(*passed.get(Three::B), 0);
   assert_eq!(*passed.get(Three::C), 1);
 }
 
 #[test]
-fn count_saturates() {
-  let mut passed = PerLane::<u32, Three>::from_fn(|_| u32::MAX);
-  count(&mut passed, Three::A, &view(&[Three::A, Three::B]));
-  assert_eq!(passed.as_slice(), &[0, u32::MAX, u32::MAX]);
+fn count_passes_u32_max_and_saturates_at_u64_max() {
+  let mut passed = PerLane::<u64, Three>::from_fn(|_| u64::from(u32::MAX));
+  *passed.get_mut(Three::C) = u64::MAX;
+  count(
+    &mut passed,
+    Three::A,
+    &view(&[Three::A, Three::B, Three::C]),
+  );
+  assert_eq!(
+    passed.as_slice(),
+    &[0, u64::from(u32::MAX) + 1, u64::MAX],
+    "a count goes past `u32::MAX`, and stops at `u64::MAX`"
+  );
+}
+
+/// A lane at a limit of `u32::MAX` is served once it is passed over one more time than that, ahead
+/// of lanes that are only at their own limits: the excess is compared in full, and the count does
+/// not stop at the limit.
+#[test]
+fn choose_and_count_serve_a_lane_at_a_limit_of_u32_max() {
+  let policy =
+    PassLimit::<Three>::new(NonZeroU32::MIN).with_lane(Three::C, NonZeroU32::new(u32::MAX));
+  let mut passed = PerLane::<u64, Three>::default();
+  *passed.get_mut(Three::C) = u64::from(u32::MAX) - 1;
+  let mut served = Vec::new();
+  for _ in 0..4 {
+    let view = [Three::A, Three::B, Three::C]
+      .iter()
+      .fold(LaneView::new(()), |view, &lane| {
+        view.with_lane(lane, 1, Some(()), *passed.get(lane))
+      });
+    let lane = choose(&view, &policy).unwrap();
+    count(&mut passed, lane, &view);
+    served.push(lane);
+  }
+  assert_eq!(
+    served,
+    [Three::A, Three::B, Three::C, Three::A],
+    "C reaches its limit at the second choice with no excess, and is owed longest at the third"
+  );
 }
 
 /// With two lanes always waiting and a limit `f` on the second, the second lane is passed over
@@ -78,7 +114,7 @@ fn count_saturates() {
 fn choose_and_count_serve_a_limited_lane_every_f_plus_one() {
   let f = 3;
   let policy = PassLimit::<Three>::new(NonZeroU32::new(f).unwrap()).with_lane(Three::A, None);
-  let mut passed = PerLane::<u32, Three>::default();
+  let mut passed = PerLane::<u64, Three>::default();
   let mut served = Vec::new();
   for _ in 0..12 {
     let view = [Three::A, Three::B]

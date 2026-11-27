@@ -8,7 +8,7 @@ const fn limit(n: u32) -> NonZeroU32 {
   }
 }
 
-fn counts(a: u32, b: u32, c: u32) -> LaneView<Three, ()> {
+fn counts(a: u64, b: u64, c: u64) -> LaneView<Three, ()> {
   LaneView::new(())
     .with_lane(Three::A, 1, Some(()), a)
     .with_lane(Three::B, 1, Some(()), b)
@@ -62,6 +62,23 @@ fn pass_limit_takes_the_largest_excess() {
 fn pass_limit_breaks_a_tie_toward_the_higher_lane() {
   let policy = PassLimit::<Three>::new(limit(8));
   assert_eq!(policy.owed(&counts(0, 10, 10)), Some(Three::B));
+}
+
+#[test]
+fn pass_limit_compares_the_full_excess_past_a_limit_of_u32_max() {
+  let policy = PassLimit::<Three>::new(limit(1)).with_lane(Three::C, Some(limit(u32::MAX)));
+  let at_its_limit = u64::from(u32::MAX);
+  assert_eq!(
+    policy.owed(&counts(1, 0, at_its_limit)),
+    Some(Three::A),
+    "a tie at no excess goes to the higher lane"
+  );
+  assert_eq!(
+    policy.owed(&counts(1, 0, at_its_limit + 1)),
+    Some(Three::C),
+    "one pass past `u32::MAX` is an excess of one"
+  );
+  assert_eq!(policy.owed(&counts(2, 0, at_its_limit + 1)), Some(Three::A));
 }
 
 #[test]
@@ -187,7 +204,7 @@ fn both() -> Both {
   )
 }
 
-fn stamped(passed_b: u32, passed_c: u32, b: u64, c: u64) -> LaneView<Three, Stamps<(), Moment>> {
+fn stamped(passed_b: u64, passed_c: u64, b: u64, c: u64) -> LaneView<Three, Stamps<(), Moment>> {
   let at = |millis: u64| Stamps {
     first: (),
     second: ms(millis),

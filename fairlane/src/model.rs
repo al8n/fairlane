@@ -108,7 +108,7 @@ pub(crate) enum Choice<T, L> {
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct Model<T, L: Lane, S> {
   lanes: Vec<LaneModel<T, S>>,
-  passed_over: Vec<u32>,
+  passed_over: Vec<u64>,
   permits: BTreeMap<PermitId, usize>,
   waiters: BTreeMap<WaiterId, Waiter>,
   next_id: u64,
