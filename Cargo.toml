@@ -9,7 +9,6 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/al8n/fairlane"
-homepage = "https://github.com/al8n/fairlane"
 readme = "README.md"
 keywords = ["channel", "mpmc", "priority", "async", "lanes"]
 categories = ["concurrency", "asynchronous", "data-structures"]
