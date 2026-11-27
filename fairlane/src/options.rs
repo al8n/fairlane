@@ -157,7 +157,8 @@ pub enum Malformed {
   Indices(usize),
   /// This lane is express, and the lane before it is not.
   ExpressBehind(usize),
-  /// This lane's capacity cannot be held as a ring.
+  /// This lane's capacity cannot be held as a ring: a capacity that cannot be laid out, or that
+  /// cannot be allocated. Nothing is shared yet, so the refusal changes nothing.
   Capacity(usize),
 }
 

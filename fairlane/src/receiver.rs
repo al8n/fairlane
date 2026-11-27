@@ -134,15 +134,14 @@ pub(crate) trait Sink<T, L: Lane> {
 /// A batch's `Vec`, grown one item at a time: reserving a whole quota up front would refuse a
 /// large quota the batch never fills.
 impl<T, L: Lane> Sink<T, L> for Vec<Received<T, L>> {
-  /// Room for a batch's first item is made as `Vec::push` makes it, and fails as it does, by a
-  /// panic or an abort: before any item is taken, so nothing is lost. Where a later item finds no
-  /// room, the batch stops and keeps what it holds.
+  /// Room for a batch's first item is asked for fallibly. Refused, capacity overflow or the
+  /// allocator, it panics, before any item is taken, so nothing is lost and nothing aborts. Where a
+  /// later item finds no room, the batch stops and keeps what it holds.
   fn room(&mut self, first: bool) -> bool {
-    if first {
-      self.reserve(1);
-      true
-    } else {
-      self.try_reserve(1).is_ok()
+    match self.try_reserve(1) {
+      Ok(()) => true,
+      Err(error) if first => no_room(error),
+      Err(_) => false,
     }
   }
 
@@ -150,6 +149,13 @@ impl<T, L: Lane> Sink<T, L> for Vec<Received<T, L>> {
     debug_assert!(self.len() < self.capacity(), "room was made first");
     self.push(received);
   }
+}
+
+/// The panic of a batch whose `Vec` cannot take its first item.
+#[cold]
+#[inline(never)]
+fn no_room(error: std::collections::TryReserveError) -> ! {
+  panic!("a batch's `Vec` cannot take its first item: {error}")
 }
 
 /// A single receive's result.

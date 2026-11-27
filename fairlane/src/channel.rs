@@ -33,7 +33,8 @@ use crate::{
 /// # Errors
 ///
 /// [`Malformed`], by name: no lane, or more than 256; a [`Lane`] whose indices do not round-trip;
-/// an express lane behind one that is not; a capacity that cannot be held as a ring.
+/// an express lane behind one that is not; a capacity that cannot be held as a ring, laid out or
+/// allocated.
 ///
 /// ```
 /// use core::num::NonZeroUsize;
@@ -85,7 +86,7 @@ pub fn channel_with<T, L: Lane, Y: Policy<L>>(
 /// # Errors
 ///
 /// [`Malformed::Capacity`] where `capacity` cannot be held as a ring: its power of two, or the
-/// ring's cells, do not fit the address space.
+/// ring's cells, do not fit the address space, or the ring's memory cannot be allocated.
 ///
 /// ```
 /// use core::num::NonZeroUsize;

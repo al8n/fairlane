@@ -150,10 +150,13 @@ the unwind: the item of a single receive (`recv`, `try_recv`, `recv_blocking`), 
 which it was given by value. A batched receive keeps every item it took in its `Vec`. The panic is
 not swallowed: that would hide a bug in the executor or the policy.
 
-**An allocation failure, capacity overflow included, panics before the call changes any state.** A
-receive that was waiting gives up its place in line first, as a dropped one does, so that what it
-was notified of passes on. A batch that finds no room for a later item stops instead, and keeps what
-it holds.
+**An allocation failure, capacity overflow included, fails before the call changes any state:** as a
+panic in a call on a live channel, or as `Malformed::Capacity` at construction. A receive that was
+waiting gives up its place in line first, as a dropped one does, so that what it was notified of
+passes on. A batch that finds no room for a later item stops instead, and keeps what it holds. The
+allocations std makes for itself, with no fallible form, fail as std fails them, before any state
+exists or changes: the channel's `Arc`, its tables and its locks' first use at construction, a
+blocking call's waker before its first poll, and a panic's own payload.
 
 ## Features
 

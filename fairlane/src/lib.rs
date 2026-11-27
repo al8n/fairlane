@@ -9,7 +9,8 @@
          inside a channel (\"Wakers, policies and items\"): a `Waker` must not panic, block, or \
          call into a channel; a `Policy` must not block or call into any channel; an item's \
          `Drop` must not block on anyone who waits on the same channel. An allocation failure, \
-         capacity overflow included, panics before the call changes any state."
+         capacity overflow included, fails before the call changes any state: as a panic in a \
+         call on a live channel, or as `Malformed::Capacity` at construction."
 )]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
