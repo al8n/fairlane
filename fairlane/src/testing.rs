@@ -171,13 +171,13 @@ mod faulty {
   unsafe fn clone(data: *const ()) -> RawWaker {
     let faults = data.cast::<Faults>();
     // SAFETY: `data` is a live `Arc<Faults>` of this vtable, borrowed.
+    if unsafe { (*faults).clone_panics.load(SeqCst) } {
+      panic!("a waker's clone panics");
+    }
+    // SAFETY: as above.
     let hook = unsafe { (*faults).on_clone.lock().unwrap().take() };
     if let Some(hook) = hook {
       hook();
-    }
-    // SAFETY: as above.
-    if unsafe { (*faults).clone_panics.load(SeqCst) } {
-      panic!("a waker's clone panics");
     }
     // SAFETY: as above; the new waker owns the count added here.
     unsafe { Arc::increment_strong_count(faults) };

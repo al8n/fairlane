@@ -481,3 +481,42 @@ fn a_batch_gives_back_every_room_before_it_wakes() {
     Poll::Ready(Ok(_))
   ));
 }
+
+/// A receive whose registration a waker's clone interrupted, polled again, joins the lines it had
+/// not joined before it waits: the next commit to any lane it admits wakes it.
+#[test]
+fn an_interrupted_registration_is_completed() {
+  let (tx, rx) = channel_with::<u32, Three, _>(three(1, false), Strict).unwrap();
+  let faults = StdArc::new(Faults::default());
+  let arm = faults.clone();
+  *faults.on_clone.lock().unwrap() = Some(Box::new(move || {
+    arm.clone_panics.store(true, SeqCst);
+  }));
+  let faulty = faults.waker();
+  let mut recv = rx.recv();
+  let interrupted = catch_unwind(AssertUnwindSafe(|| poll_with(&mut recv, &faulty)));
+  faults.clone_panics.store(false, SeqCst);
+  assert!(interrupted.is_err(), "the second lane's clone panicked");
+  let snapshot = rx.snapshot();
+  assert_eq!(
+    (
+      snapshot.receivers_waiting(Three::A),
+      snapshot.receivers_waiting(Three::B)
+    ),
+    (1, 0),
+    "lane B was never joined"
+  );
+
+  let (probe, waker) = Probe::new();
+  assert!(poll_with(&mut recv, &waker).is_pending());
+  for lane in Three::ALL {
+    assert_eq!(
+      rx.snapshot().receivers_waiting(lane),
+      1,
+      "in {lane:?}'s line"
+    );
+  }
+  tx.try_send(Three::C, 5).unwrap();
+  assert!(probe.take(), "the commit to lane C woke the receive");
+  assert!(matches!(poll_with(&mut recv, &waker), Poll::Ready(Ok(_))));
+}

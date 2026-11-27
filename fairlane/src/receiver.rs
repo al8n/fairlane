@@ -643,17 +643,21 @@ impl<T, L: Lane, Y: Policy<L>> fmt::Debug for Receiver<T, L, Y> {
 ///
 /// - **To sleep** it joins the line of each lane, then looks again. Each place goes into the
 ///   future the moment it exists, so a waker clone that panics on a later lane leaves the earlier
-///   places to the future's drop.
+///   places to the future's drop. A future polled again after such a panic joins the lines it had
+///   not joined, before it can wait: a lane it is missing from would never wake it.
 /// - **On waking** it leaves every line, spending its notifications, and takes. Where that take
 ///   unwinds, a [`Repair`] runs the chain the take would have run.
-/// - **Dropped while it waits,** it leaves every line and passes on a notification it held. Each
-///   lane is left under its own lock, and every waker it lets go runs under its own catch, so a
-///   waker that panics leaves no place behind: a place left behind would hold its lane's one
-///   notification for ever.
+/// - **Dropped while it waits,** it leaves every line and passes on a notification it held. Every
+///   line is left first, each under its own lock; then the wakers it let go run, each under its
+///   own catch. So a waker that panics leaves no place behind, and a place left behind would hold
+///   its lane's one notification for ever.
 pub(crate) struct Arrival<L: Lane> {
   /// Its place in each lane it sleeps on.
   keys: PerLane<Option<Key>, L>,
+  /// Whether it may hold a place: it began to join the lines.
   asleep: bool,
+  /// Whether it is in the line of every lane its quota admits.
+  registered: bool,
 }
 
 impl<L: Lane> Arrival<L> {
@@ -661,18 +665,20 @@ impl<L: Lane> Arrival<L> {
     Self {
       keys: PerLane::from_array(Array::from_fn(|_| None)),
       asleep: false,
+      registered: false,
     }
   }
 
-  /// Joins the line of every lane `quota` admits.
+  /// Joins the line of every lane `quota` admits that it is not in yet.
   fn sleep<T, Y: Policy<L>>(&mut self, shared: &Shared<T, L, Y>, quota: &Quota<L>, waker: &Waker) {
     self.asleep = true;
     for (index, key) in self.keys.as_mut_slice().iter_mut().enumerate() {
-      if quota.admits_at(index) {
+      if quota.admits_at(index) && key.is_none() {
         let fresh = waker.clone();
         *key = Some(shared.lane_at(index).arrivals.listen(fresh));
       }
     }
+    self.registered = true;
   }
 
   /// Whether a lane's notification has come.
@@ -698,6 +704,7 @@ impl<L: Lane> Arrival<L> {
       return;
     }
     self.asleep = false;
+    self.registered = false;
     let mut wakers: PerLane<(Option<Waker>, Option<Waker>), L> =
       PerLane::from_array(Array::from_fn(|_| (None, None)));
     for (index, key) in self.keys.as_mut_slice().iter_mut().enumerate() {
@@ -745,7 +752,7 @@ impl<L: Lane> Arrival<L> {
         }
         Took::Nothing => {}
       }
-      if !self.asleep {
+      if !self.registered {
         self.sleep(shared, quota, cx.waker());
         continue;
       }
