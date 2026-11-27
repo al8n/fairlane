@@ -1,7 +1,6 @@
 //! What the two halves share, and the constructors.
 
 use core::{
-  any::Any,
   mem,
   num::NonZeroUsize,
   panic::AssertUnwindSafe,
@@ -24,7 +23,7 @@ use crate::{
   snapshot::{Reading, Snapshot},
   sync::{Arc, AtomicBool, AtomicU64, AtomicUsize, Mutex, Ordering, lock},
   waiters::{self, Key, State, Waiters},
-  wake::{Wakes, dispose, wake},
+  wake::{Wakes, wake},
 };
 
 /// A channel of several lanes, with the default policy: a count and a time, whichever comes first
@@ -521,8 +520,11 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   ///
   /// The wakes this close resolves run before the destructors of the items it drops. A wake that a
   /// concurrent close took from its waiter's place first is that close's to deliver, and may run
-  /// later; the item contract makes neither order one a destructor can wait on. A waker's panic is
-  /// held until every item and every caught panic is disposed of, and raised then.
+  /// later; the item contract makes neither order one a destructor can wait on.
+  ///
+  /// Only the first panic, a waker's or a destructor's, is kept, and it is resumed once every item
+  /// is dropped; every later one is disposed of at once. So the drains keep one payload, grow
+  /// nothing, and no panic of their own can stop them.
   pub(crate) fn drop_receiver(&self) {
     if self.receivers.fetch_sub(1, Ordering::AcqRel) != 1 {
       return;
@@ -533,7 +535,6 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     // Each item is dropped after the choice lock is let go, under its own catch. The close has
     // emptied every line, so a room given back here grants no reserve. The lookahead is drained
     // one lane at a time, the lock taken for each, so that nothing is collected.
-    let mut payloads = Vec::new();
     if let Some(choice) = &self.choice {
       // No re-entry check: a receive inside this choice borrows a live receiver, so none is last.
       for (index, state) in self.lanes.iter().enumerate() {
@@ -547,7 +548,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
         };
         if let Some(popped) = popped {
           wakes.wake(state.release());
-          contain(popped.item, &mut payloads);
+          contain(popped.item, &mut wakes);
         }
       }
     }
@@ -557,23 +558,20 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
           state.taken.store(popped.ordinal + 1, Ordering::Relaxed);
         }
         wakes.wake(state.release());
-        contain(popped.item, &mut payloads);
+        contain(popped.item, &mut wakes);
       }
     }
-    // The panics are disposed of once both drains are done: a payload whose own drop panics
-    // then stops no drain.
-    for payload in payloads {
-      dispose(payload);
-    }
+    // The first panic, resumed now that every item is dropped.
     wakes.finish();
   }
 }
 
-/// Drops `item` under its own catch, keeping the panic of a destructor that panics in `payloads`,
-/// to be disposed of once both drains are done.
-fn contain<T>(item: T, payloads: &mut Vec<Box<dyn Any + Send>>) {
+/// Drops `item` under its own catch. The panic of a destructor that panics is kept in `wakes`
+/// where it is the first, to be resumed once both drains are done, and disposed of at once
+/// otherwise.
+fn contain<T>(item: T, wakes: &mut Wakes) {
   if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(move || drop(item))) {
-    payloads.push(payload);
+    wakes.hold(payload);
   }
 }
 

@@ -46,10 +46,16 @@ impl Wakes {
 
   fn run(&mut self, f: impl FnOnce()) {
     if let Err(panic) = catch_unwind(AssertUnwindSafe(f)) {
-      match self.panic {
-        None => self.panic = Some(panic),
-        Some(_) => dispose(panic),
-      }
+      self.hold(panic);
+    }
+  }
+
+  /// Keeps `panic` where it is the first, to be raised by [`finish`](Self::finish); disposes of
+  /// it at once otherwise. One payload is kept, so nothing grows.
+  pub(crate) fn hold(&mut self, panic: Box<dyn Any + Send>) {
+    match self.panic {
+      None => self.panic = Some(panic),
+      Some(_) => dispose(panic),
     }
   }
 

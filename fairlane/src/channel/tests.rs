@@ -212,9 +212,10 @@ fn disconnect_drops_every_item_under_its_own_catch() {
   }
   let hook = std::panic::take_hook();
   std::panic::set_hook(Box::new(|_| {}));
-  drop(rx);
+  let dropped = std::panic::catch_unwind(core::panic::AssertUnwindSafe(move || drop(rx)));
   std::panic::set_hook(hook);
-  assert_eq!(drops.load(SeqCst), 4);
+  assert_eq!(drops.load(SeqCst), 4, "every item is dropped first");
+  crate::wake::dispose(dropped.expect_err("the first destructor's panic is resumed"));
 }
 
 /// A payload whose own drop panics.
@@ -257,8 +258,10 @@ fn disconnect_survives_a_payload_whose_drop_panics() {
   let dropped = std::panic::catch_unwind(core::panic::AssertUnwindSafe(move || drop(taken)));
   crate::wake::dispose(dropped.unwrap_err());
   drops.store(0, SeqCst);
-  drop(rx);
+  let dropped = std::panic::catch_unwind(core::panic::AssertUnwindSafe(move || drop(rx)));
   assert_eq!(drops.load(SeqCst), 2, "both items left were dropped");
+  // The first destructor's payload is resumed; its own drop panics, so it is disposed of here.
+  crate::wake::dispose(dropped.expect_err("the first destructor's panic is resumed"));
   assert_eq!(tx.snapshot().received(Three::C), 2);
 }
 
@@ -405,7 +408,9 @@ fn a_disposal_drops_the_payload_its_payload_hands_on() {
   let (tx, rx) = bounded::<Passes>(cap(1)).unwrap();
   tx.try_send(Single, Passes(Some(permit))).unwrap();
   assert_eq!(other.snapshot().remaining(Single), 0);
-  drop(rx);
+  // The teardown resumes the destructor's panic, the chain's first link, once the item is dropped.
+  let dropped = std::panic::catch_unwind(core::panic::AssertUnwindSafe(move || drop(rx)));
+  crate::wake::dispose(dropped.expect_err("the destructor's panic is resumed"));
   assert_eq!(
     other.snapshot().remaining(Single),
     1,
