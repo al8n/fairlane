@@ -558,11 +558,21 @@ impl<L: Lane, A: Policy<L>, B: Policy<L>> Policy<L> for FirstOf<A, B> {
     }
   }
 
+  /// A lane `first` names outside the view is ignored, as [`choose`](crate::choice::choose)
+  /// ignores it, and `second` is asked instead. So is one `second` names: the answer is a lane of
+  /// the view, or none.
   fn owed(&self, view: &LaneView<L, Self::Stamp>) -> Option<L> {
+    let in_view = |lane: &L| view.contains(*lane);
     self
       .first
       .owed(&view.map(|stamps| stamps.first))
-      .or_else(|| self.second.owed(&view.map(|stamps| stamps.second)))
+      .filter(in_view)
+      .or_else(|| {
+        self
+          .second
+          .owed(&view.map(|stamps| stamps.second))
+          .filter(in_view)
+      })
   }
 }
 

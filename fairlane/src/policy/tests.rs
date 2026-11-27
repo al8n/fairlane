@@ -306,6 +306,40 @@ fn first_of_stamps_one_of_each_and_lends_both_parts() {
   assert_eq!(policy.first().limit(Three::B), None);
 }
 
+/// A policy that always names one lane, in the view or not.
+struct Names(Three);
+
+impl Policy<Three> for Names {
+  type Stamp = ();
+
+  fn stamp(&self) {}
+
+  fn owed(&self, _: &LaneView<Three, ()>) -> Option<Three> {
+    Some(self.0)
+  }
+}
+
+/// A first answer outside the view does not stop the second from being asked, and a second
+/// answer outside the view is no answer.
+#[test]
+fn first_of_asks_the_second_where_the_first_names_a_lane_outside_the_view() {
+  let view = LaneView::<Three, Stamps<(), ()>>::new(Stamps::default())
+    .with_lane(Three::A, 1, Some(Stamps::default()), 0)
+    .with_lane(Three::B, 1, Some(Stamps::default()), 0);
+  assert_eq!(
+    FirstOf::new(Names(Three::C), Names(Three::B)).owed(&view),
+    Some(Three::B)
+  );
+  assert_eq!(
+    FirstOf::new(Names(Three::A), Names(Three::B)).owed(&view),
+    Some(Three::A)
+  );
+  assert_eq!(
+    FirstOf::new(Names(Three::C), Names(Three::C)).owed(&view),
+    None
+  );
+}
+
 #[test]
 fn default_policy_is_both_defaults() {
   let policy = DefaultPolicy::<Three>::default();
