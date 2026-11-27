@@ -38,7 +38,7 @@ impl Arrivals {
     }
   }
 
-  /// Takes the line's lock once, at the channel's construction, so that no later lock allocates.
+  /// Takes the line's lock once, at the channel's construction: no later call is its first use.
   pub(crate) fn warm(&self) {
     drop(lock(&self.line));
   }

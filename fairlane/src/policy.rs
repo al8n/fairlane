@@ -375,7 +375,7 @@ impl MaxWait {
       threshold: AtomicU64::new(nanos.unwrap_or(NO_WAIT)),
       set: std::sync::Mutex::new(nanos),
     };
-    // Locked once here: std's `Mutex` may allocate its native mutex at its first lock.
+    // Locked once here, at construction, so that no setter is the lock's first use.
     drop(wait.lock());
     wait
   }

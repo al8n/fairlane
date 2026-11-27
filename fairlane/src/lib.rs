@@ -8,9 +8,11 @@
          docs.rs, this page is the README, with its examples and the contracts your code keeps \
          inside a channel (\"Wakers, policies and items\"): a `Waker` must not panic, block, or \
          call into a channel; a `Policy` must not block or call into any channel; an item's \
-         `Drop` must not block on anyone who waits on the same channel. An allocation failure, \
-         capacity overflow included, fails before the call changes any state: as a panic in a \
-         call on a live channel, or as `Malformed::Capacity` at construction."
+         `Drop` must not block on anyone who waits on the same channel. An allocation failure in \
+         fairlane's own allocations, capacity overflow included, fails before the call changes \
+         the channel or moves an item: as a panic in a call on a live channel, or as \
+         `Malformed::Capacity` at construction. Allocations std makes inside its own primitives \
+         are outside this guarantee."
 )]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]

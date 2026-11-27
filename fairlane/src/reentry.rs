@@ -18,7 +18,7 @@ use core::cell::RefCell;
 const DEPTH: usize = 8;
 
 /// The channels whose choice lock this thread holds, by address. A fixed table with no
-/// destructor: its first access on a thread registers nothing and allocates nothing.
+/// destructor, so fairlane allocates nothing for it; the thread-local storage itself is std's.
 #[derive(Clone, Copy)]
 struct Held {
   channels: [usize; DEPTH],
@@ -56,7 +56,7 @@ pub(crate) struct Choosing {
 }
 
 impl Choosing {
-  /// Marks the channel at `channel` as chosen for on this thread. Allocates nothing.
+  /// Marks the channel at `channel` as chosen for on this thread. Fairlane allocates nothing here.
   pub(crate) fn enter(channel: usize) -> Self {
     let marked = CHOOSING
       .try_with(|held| {

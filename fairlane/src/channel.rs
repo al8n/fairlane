@@ -222,8 +222,9 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     Ok(shared)
   }
 
-  /// Takes every lock once, before the channel is shared: std's `Mutex` may allocate its native
-  /// mutex at its first lock (pthread, on macOS), and then no later lock does.
+  /// Takes every lock once, before the channel is shared, so that no later call is a lock's first
+  /// use. What std allocates inside a lock, then or later, is std's own, outside the crate's
+  /// allocation guarantee (the README, "Wakers, policies and items").
   fn warm(&self) {
     for state in self.lanes.iter() {
       state.reserves.warm();
@@ -334,7 +335,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   /// Everything a close wakes, its reserves, its receivers and its `closed()` futures, is woken
   /// once every state change of the close is done: a waker is user code, and one that panics
   /// leaves no lane open. The wakes are delivered from the waiters' own places, a chunk at a time,
-  /// so nothing is allocated after the first state change.
+  /// so fairlane allocates nothing after the first state change.
   pub(crate) fn close(&self) -> bool {
     let first = self.shut();
     let mut wakes = Wakes::new();
@@ -343,9 +344,9 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     first
   }
 
-  /// Every state change of a close, and no waker run, and nothing allocated: each lane's room and
-  /// its ring's mark, each lane's waiting receivers notified, the closed flag, and the `closed()`
-  /// futures notified. Every wake is left owed in its waiter's place.
+  /// Every state change of a close, with no waker run and no allocation of fairlane's: each lane's
+  /// room and its ring's mark, each lane's waiting receivers notified, the closed flag, and the
+  /// `closed()` futures notified. Every wake is left owed in its waiter's place.
   fn shut(&self) -> bool {
     let first = !self.closing.swap(true, Ordering::SeqCst);
     for state in self.lanes.iter() {

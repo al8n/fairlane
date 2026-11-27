@@ -377,8 +377,8 @@ impl Waiters {
 }
 
 /// Wakes every waker a broadcast left owed in `line`, [`CHUNK`] at a time: each chunk is taken out
-/// under the lock into a buffer on the stack, and woken after it. It needs no memory, so it cannot
-/// fail between the broadcast's state changes and their wakes.
+/// under the lock into a buffer on the stack, and woken after it. Fairlane allocates nothing here,
+/// so no allocation of its own stands between the broadcast's state changes and their wakes.
 pub(crate) fn dispatch(line: &Mutex<Waiters>, wakes: &mut Wakes) {
   loop {
     let mut chunk: [Option<Waker>; CHUNK] = [const { None }; CHUNK];

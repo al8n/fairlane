@@ -135,8 +135,8 @@ pub(crate) trait Sink<T, L: Lane> {
 /// large quota the batch never fills.
 impl<T, L: Lane> Sink<T, L> for Vec<Received<T, L>> {
   /// Room for a batch's first item is asked for fallibly. Refused, capacity overflow or the
-  /// allocator, it panics, before any item is taken, so nothing is lost and nothing aborts. Where a
-  /// later item finds no room, the batch stops and keeps what it holds.
+  /// allocator, it panics before any item is taken: nothing is lost, and the refusal is a panic,
+  /// not an abort. Where a later item finds no room, the batch stops and keeps what it holds.
   fn room(&mut self, first: bool) -> bool {
     match self.try_reserve(1) {
       Ok(()) => true,
