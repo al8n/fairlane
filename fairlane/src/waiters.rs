@@ -11,10 +11,9 @@
 //! - **The places live in one vector,** reused. The queued ones form a list through it, oldest
 //!   first, and the owed ones another, so a waiter that leaves leaves its list at once. The vector
 //!   keeps the most places ever taken at once: as many as there were waiters at one time. It grows
-//!   only through [`Waiters::make_room`], before its owner changes any state.
+//!   through [`Waiters::make_room`], before a waker is handed over.
 
 use core::task::Waker;
-use std::collections::TryReserveError;
 
 use crate::{
   sync::{Mutex, lock},
@@ -133,15 +132,11 @@ impl Waiters {
     self.notified
   }
 
-  /// Makes room for one more waiter, where no freed place is left, before a waker is handed over
-  /// and before the line's owner changes any state: a failure is then the caller's to report with
-  /// nothing changed, its lock let go first, so that the waker it keeps is dropped outside the
-  /// lock.
-  pub(crate) fn make_room(&mut self) -> Result<(), TryReserveError> {
+  /// Makes room for one more waiter, where no freed place is left, before a waker is handed over:
+  /// the waker is never in a place that is still being made. It allocates as std does.
+  pub(crate) fn make_room(&mut self) {
     if self.vacant == NIL {
-      self.slots.try_reserve(1)
-    } else {
-      Ok(())
+      self.slots.reserve(1);
     }
   }
 
@@ -391,14 +386,6 @@ pub(crate) fn dispatch(line: &Mutex<Waiters>, wakes: &mut Wakes) {
       return;
     }
   }
-}
-
-/// The panic of a line that cannot grow, raised by its owner once it has let its lock and the
-/// waker go.
-#[cold]
-#[inline(never)]
-pub(crate) fn full(error: TryReserveError) -> ! {
-  panic!("a channel's waiter line cannot take one more waiter: {error}")
 }
 
 /// A fresh queue's identity, for the debug check that a key goes back to its own queue. A plain

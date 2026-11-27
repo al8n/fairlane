@@ -114,11 +114,7 @@ impl Reserves {
         Join::Take(next) => next,
         Join::Queue(next) => {
           // Before the word changes, and before the waker is handed over.
-          if let Err(error) = line.make_room() {
-            drop(line);
-            drop(fresh);
-            waiters::full(error);
-          }
+          line.make_room();
           next
         }
       };

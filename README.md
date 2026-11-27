@@ -155,22 +155,9 @@ the unwind: the item of a single receive (`recv`, `try_recv`, `recv_blocking`), 
 which it was given by value. A batched receive keeps every item it took in its `Vec`. The panic is
 not swallowed: that would hide a bug in the executor or the policy.
 
-**An allocation failure in fairlane's own allocations, capacity overflow included, fails before the
-call changes the channel or moves an item:** as a panic in a call on a live channel, or as
-`Malformed::Capacity` at construction.
-
-- A receive that was waiting gives up its place in line first, as a dropped one does, so that what
-  it was notified of passes on.
-- A batch that finds no room for a later item stops instead, and keeps what it holds.
-- A failed call leaves a destination's length and items as they were, though its spare capacity may
-  have grown.
-- Two of fairlane's allocations have no fallible form on stable Rust: the channel's `Arc` and a
-  blocking call's waker. Each is made before the channel, or the call, has changed anything, and
-  fails as std fails it.
-- Allocations that std makes inside its own primitives are outside this guarantee: thread-local
-  storage, a lock's or a thread parker's resources, and a panic's payload. They fail as std fails
-  them.
-- Fairlane uses each of its locks once at construction, before the channel is shared.
+**Fairlane allocates as std does.** During a call, an allocation failure aborts the process, as
+`Vec::push` does. At construction, a capacity that cannot be laid out or allocated is refused as
+`Malformed::Capacity`, since it comes from your options.
 
 ## Features
 

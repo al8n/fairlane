@@ -131,31 +131,18 @@ pub(crate) trait Sink<T, L: Lane> {
   fn put(&mut self, received: Received<T, L>);
 }
 
-/// A batch's `Vec`, grown one item at a time: reserving a whole quota up front would refuse a
-/// large quota the batch never fills.
+/// A batch's `Vec`, grown one item at a time, as std grows it: reserving a whole quota up front
+/// would reserve for items the batch never takes.
 impl<T, L: Lane> Sink<T, L> for Vec<Received<T, L>> {
-  /// Room for a batch's first item is asked for fallibly. Refused, capacity overflow or the
-  /// allocator, it panics before any item is taken: nothing is lost, and the refusal is a panic,
-  /// not an abort. Where a later item finds no room, the batch stops and keeps what it holds.
-  fn room(&mut self, first: bool) -> bool {
-    match self.try_reserve(1) {
-      Ok(()) => true,
-      Err(error) if first => no_room(error),
-      Err(_) => false,
-    }
+  fn room(&mut self, _: bool) -> bool {
+    self.reserve(1);
+    true
   }
 
   fn put(&mut self, received: Received<T, L>) {
     debug_assert!(self.len() < self.capacity(), "room was made first");
     self.push(received);
   }
-}
-
-/// The panic of a batch whose `Vec` cannot take its first item.
-#[cold]
-#[inline(never)]
-fn no_room(error: std::collections::TryReserveError) -> ! {
-  panic!("a batch's `Vec` cannot take its first item: {error}")
 }
 
 /// A single receive's result.
@@ -199,16 +186,17 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     let lane_limit = quota.limit_at(0);
     let mut held = 0;
     while fits(held, quota.limit(), lane_limit) {
-      // A lane with no item asks the sink for no room: the first room may panic, and an empty or
-      // ended lane must answer as such.
+      // A lane with no item asks the sink for no room: an empty or ended lane answers as such, and
+      // grows nothing.
       if held == 0 && state.ring.is_empty() {
         break;
       }
       // Room for the item, and a place for the waker its room may be granted to, are both made
       // before the item leaves its lane: after the pop nothing can fail.
-      if !sink.room(held == 0) || !granted.room() {
+      if !sink.room(held == 0) {
         break;
       }
+      granted.room();
       let Some(popped) = state.ring.pop() else {
         break;
       };
@@ -346,9 +334,10 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
       let lane_limit = quota.limit_at(chosen);
       // Room for the item, and a place for the waker its room may be granted to, are both made
       // before the item leaves its lane: after the pop nothing can fail.
-      if !fits(held, limit, lane_limit) || !sink.room(held == 0) || !back.granted.room() {
+      if !fits(held, limit, lane_limit) || !sink.room(held == 0) {
         break;
       }
+      back.granted.room();
       let state = self.lane_at(chosen);
       let popped = match choice.ahead[chosen].take() {
         Some(popped) => popped,

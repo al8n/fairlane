@@ -9,11 +9,9 @@
          inside a channel (\"Wakers, policies and items\"): a `Waker` must not panic, block on a \
          channel or wait for another party's progress through it, or call into a channel; a \
          `Policy` must not block or call into any channel; an item's `Drop` must not block on \
-         anyone who waits on the same channel. An allocation failure in \
-         fairlane's own allocations, capacity overflow included, fails before the call changes \
-         the channel or moves an item: as a panic in a call on a live channel, or as \
-         `Malformed::Capacity` at construction. Allocations std makes inside its own primitives \
-         are outside this guarantee."
+         anyone who waits on the same channel. Fairlane allocates as std does: during a call, an \
+         allocation failure aborts the process, as `Vec::push` does; at construction, a capacity \
+         that cannot be laid out or allocated is refused as `Malformed::Capacity`."
 )]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]

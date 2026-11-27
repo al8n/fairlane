@@ -49,11 +49,7 @@ impl Arrivals {
   pub(crate) fn listen(&self, waker: Waker) -> Key {
     let key = {
       let mut line = lock(&self.line);
-      if let Err(error) = line.make_room() {
-        drop(line);
-        drop(waker);
-        waiters::full(error);
-      }
+      line.make_room();
       let key = line.insert(waker);
       self.count.fetch_add(1, Ordering::SeqCst);
       key

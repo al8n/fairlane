@@ -1,4 +1,5 @@
-//! Allocation refusal: an allocation fairlane makes for itself, refused, fails without aborting.
+//! Allocation refusal at construction: a table or a ring the constructor cannot allocate is refused
+//! as `Malformed::Capacity`, without aborting. During a call fairlane allocates as std does.
 //!
 //! A global allocator refuses the one request it is armed for. The binary has no test harness, so
 //! no other thread allocates while it is armed, and the requests are counted exactly.
@@ -6,11 +7,10 @@
 use std::{
   alloc::{GlobalAlloc, Layout, System},
   num::NonZeroUsize,
-  panic::{self, AssertUnwindSafe},
   sync::atomic::{AtomicUsize, Ordering::SeqCst},
 };
 
-use fairlane::{Lane, LaneOptions, Malformed, Options, Received, Single, Strict, channel_with};
+use fairlane::{Lane, LaneOptions, Malformed, Options, Single, Strict, channel_with};
 
 /// The requests seen since the allocator was last armed.
 static SEEN: AtomicUsize = AtomicUsize::new(0);
@@ -145,27 +145,7 @@ fn construction_refuses_each_table_by_lane() {
   }
 }
 
-/// A batch whose first slot is refused panics before it takes anything: the item stays queued,
-/// and the destination is as it was.
-fn a_refused_first_slot_panics_and_takes_nothing() {
-  let one = Options::<Single>::from_fn(|_| LaneOptions::new(NonZeroUsize::MIN));
-  let (tx, rx) = channel_with::<u8, Single, Strict>(one, Strict).unwrap();
-  tx.try_send(Single, 7).unwrap();
-  let mut batch: Vec<Received<u8, Single>> = Vec::new();
-  let hook = panic::take_hook();
-  panic::set_hook(Box::new(|_| {}));
-  let (unwound, _) = refusing(0, || {
-    panic::catch_unwind(AssertUnwindSafe(|| rx.try_recv_many(&mut batch, 1))).is_err()
-  });
-  panic::set_hook(hook);
-  assert!(unwound, "the refusal is a panic");
-  assert_eq!((batch.len(), batch.capacity()), (0, 0));
-  let received = rx.try_recv().unwrap().expect("the item is still queued");
-  assert_eq!(*received.item(), 7);
-}
-
 fn main() {
   construction_refuses_each_table_by_lane();
-  a_refused_first_slot_panics_and_takes_nothing();
-  println!("alloc_refusal: every refusal answered, none aborted");
+  println!("alloc_refusal: every construction refusal answered, none aborted");
 }

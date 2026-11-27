@@ -79,7 +79,7 @@ impl Tasks {
 
 /// Puts `waker` in line as the queues' owners do: room first, then the waiter.
 fn insert(waiters: &mut Waiters, waker: Waker) -> Key {
-  waiters.make_room().unwrap();
+  waiters.make_room();
   waiters.insert(waker)
 }
 
@@ -90,7 +90,7 @@ fn room_is_made_only_where_no_freed_place_is_left() {
   let first = insert(&mut waiters, tasks.waker(0));
   let _ = waiters.remove(first);
   let capacity = waiters.slots.capacity();
-  waiters.make_room().unwrap();
+  waiters.make_room();
   assert_eq!(
     waiters.slots.capacity(),
     capacity,

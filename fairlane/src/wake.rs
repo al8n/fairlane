@@ -106,9 +106,9 @@ const STAGED_INLINE: usize = 8;
 /// where it is dropped first, as on an unwind, by its drop.
 ///
 /// A place for each is made before the item that may produce it leaves its lane, so that keeping
-/// the waker once the item is out never needs memory and cannot fail. The first places are inline;
-/// the rest are in a `Vec`, grown one place at a time, beforehand, and only where a batch takes
-/// more items than the inline places.
+/// the waker once the item is out needs no memory. The first places are inline; the rest are in a
+/// `Vec`, grown one place at a time, beforehand, as std grows it, and only where a batch takes more
+/// items than the inline places.
 pub(crate) struct Staged {
   inline: [Option<Waker>; STAGED_INLINE],
   more: Vec<Waker>,
@@ -129,17 +129,15 @@ impl Staged {
     }
   }
 
-  /// Makes a place for the waker one more item may produce, before the item is taken. False where
-  /// none can be made: the batch stops there, and keeps what it holds.
-  pub(crate) fn room(&mut self) -> bool {
+  /// Makes a place for the waker one more item may produce, before the item is taken.
+  pub(crate) fn room(&mut self) {
     if self.made >= STAGED_INLINE {
       let needed = self.made + 1 - STAGED_INLINE;
-      if self.more.capacity() < needed && self.more.try_reserve(needed - self.more.len()).is_err() {
-        return false;
+      if self.more.capacity() < needed {
+        self.more.reserve(needed - self.more.len());
       }
     }
     self.made += 1;
-    true
   }
 
   /// Keeps the waker an item taken produced, where it produced one, in the place made for it.
