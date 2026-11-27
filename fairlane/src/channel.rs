@@ -126,8 +126,6 @@ pub(crate) struct LaneState<T, S> {
   /// that is not express, of a channel of two lanes or more, under a policy whose stamp is not
   /// zero-sized.
   pub(crate) lookahead: bool,
-  /// 1 while the choice lock holds this lane's oldest item, popped to read its stamp; 0 else.
-  pub(crate) ahead: AtomicUsize,
   /// On a lane with a lookahead, every item taken out: the snapshot's `received`, stored by the
   /// holder of the choice lock and by the last receiver's drain. On a lane without one, that is
   /// the ring's head.
@@ -204,7 +202,6 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
         arrivals: Arrivals::new(),
         capacity: capacity(index),
         lookahead: stamped(index) && size_of::<Y::Stamp>() != 0,
-        ahead: AtomicUsize::new(0),
         taken: AtomicU64::new(0),
       });
     }
@@ -407,8 +404,8 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     let readings = Array::from_fn(|index| {
       let state = &self.lanes[index];
       // One reading each. An item the choice lock holds ahead is popped and not taken, so a lane
-      // with a lookahead counts its takes apart: its head moves at the pop, and `head - ahead`
-      // would rise and fall again across one move into the lookahead.
+      // with a lookahead counts its takes apart: its head moves when an item moves into the
+      // lookahead, before any receive takes it.
       let received = if state.lookahead {
         state.taken.load(Ordering::Relaxed)
       } else {
@@ -469,9 +466,9 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
       let mut choice = lock(choice);
       for (index, slot) in choice.ahead.iter_mut().enumerate() {
         if let Some(popped) = slot.take() {
-          let state = &self.lanes[index];
-          state.ahead.store(0, Ordering::Relaxed);
-          state.taken.store(popped.ordinal + 1, Ordering::Relaxed);
+          self.lanes[index]
+            .taken
+            .store(popped.ordinal + 1, Ordering::Relaxed);
           ahead.push((index, popped.item));
         }
       }

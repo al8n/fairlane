@@ -359,3 +359,58 @@ fn ms1_received_never_goes_backward() {
     drop((observer.join().unwrap(), rx));
   });
 }
+
+/// A chain for lane B against a take that moves B's only item into the lookahead and leaves it
+/// there, taking lane A's instead; the take runs no chain of its own, as a take that unwinds out
+/// of its policy does not. The chain reads B where no item is in transit, so it never finds B
+/// empty while the item is between the ring and the lookahead, and it wakes B's waiting receiver.
+#[test]
+fn ma8_a_chain_sees_an_item_moving_into_the_lookahead() {
+  use std::sync::atomic::{AtomicBool as Flag, Ordering};
+
+  struct Woken(Flag);
+  impl std::task::Wake for Woken {
+    fn wake(self: std::sync::Arc<Self>) {
+      self.0.store(true, Ordering::SeqCst);
+    }
+  }
+
+  model(|| {
+    let options = Options::from_fn(|_| LaneOptions::new(NonZeroUsize::MIN));
+    let (tx, rx) = channel_with::<u8, Three, Stamped>(options, Stamped).unwrap();
+    tx.try_send(Three::A, 1).unwrap();
+    tx.try_send(Three::B, 2).unwrap();
+    let woken = std::sync::Arc::new(Woken(Flag::new(false)));
+    let key = tx
+      .shared()
+      .lane_at(1)
+      .arrivals
+      .listen(std::task::Waker::from(woken.clone()));
+    let taker = {
+      let tx = tx.clone();
+      thread::spawn(move || {
+        let mut slot = None;
+        tx.shared().take(&Quota::up_to(1), &mut slot);
+        assert_eq!(slot.map(|received| received.lane()), Some(Three::A));
+        tx
+      })
+    };
+    let chainer = {
+      let tx = tx.clone();
+      thread::spawn(move || {
+        tx.shared()
+          .chain(&Quota::up_to(1).lanes(Three::B..=Three::B));
+        tx
+      })
+    };
+    drop((taker.join().unwrap(), chainer.join().unwrap()));
+    assert!(
+      woken.0.load(Ordering::SeqCst),
+      "the chain woke the receiver waiting on lane B"
+    );
+    let mut wakes = crate::wake::Wakes::new();
+    tx.shared().lane_at(1).arrivals.leave(key, true, &mut wakes);
+    wakes.finish();
+    drop((tx, rx));
+  });
+}

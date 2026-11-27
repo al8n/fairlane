@@ -258,9 +258,6 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
           // pops, so the ring keeps the item it showed.
           *ahead = state.ring.pop();
           holds = ahead.is_some();
-          if holds {
-            state.ahead.store(1, Ordering::Relaxed);
-          }
         }
         waiting.as_mut_slice()[index] = holds;
       }
@@ -311,10 +308,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
       }
       let state = self.lane_at(chosen);
       let popped = match choice.ahead[chosen].take() {
-        Some(popped) => {
-          state.ahead.store(0, Ordering::Relaxed);
-          popped
-        }
+        Some(popped) => popped,
         None => match state.ring.pop() {
           Some(popped) => popped,
           None => break,
@@ -356,16 +350,42 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   /// waiting receiver of that lane is woken. Every admitted lane is looked at, not only the one
   /// this receive woke on.
   ///
-  /// Each lane's notification is made before its waker runs, and each waker runs under its own
-  /// catch, so a waker that panics leaves no other lane's receiver asleep.
+  /// - **What a lane holds is read where no item is in transit.** On a channel of two lanes or
+  ///   more, every pop is made under the choice lock, and an item popped ahead stays in the
+  ///   lookahead until a choice takes it. Read under that lock, a lane's ring and its lookahead
+  ///   together show every item it holds: one moving from the ring into the lookahead cannot look
+  ///   like neither. The lock is let go before any waker runs. A channel of one lane has no
+  ///   lookahead, and its ring alone shows what it holds.
+  /// - **The lock is taken only where a receiver waits** on a lane the quota admits.
+  /// - **Every lane's notification is made before any waker runs,** each then under its own
+  ///   catch, so a waker that panics, or blocks, leaves no other lane's receiver asleep.
   pub(crate) fn chain(&self, quota: &Quota<L>) {
-    let mut wakes = Wakes::new();
-    for index in 0..lane_count::<L>() {
-      let state = self.lane_at(index);
-      let holds = state.ahead.load(Ordering::Relaxed) != 0 || !state.ring.is_empty();
-      if quota.admits_at(index) && holds {
-        wakes.wake(state.arrivals.wake_one());
+    let count = lane_count::<L>();
+    let waited =
+      |index: usize| quota.admits_at(index) && self.lane_at(index).arrivals.waiting() != 0;
+    if !(0..count).any(waited) {
+      return;
+    }
+    let holds: PerLane<bool, L> = match self.choice() {
+      Some(choice) => {
+        let choice = lock(choice);
+        PerLane::from_array(Array::from_fn(|index| {
+          waited(index) && (choice.ahead[index].is_some() || !self.lane_at(index).ring.is_empty())
+        }))
       }
+      None => PerLane::from_array(Array::from_fn(|index| {
+        waited(index) && !self.lane_at(index).ring.is_empty()
+      })),
+    };
+    let mut wakers: PerLane<Option<Waker>, L> = PerLane::from_array(Array::from_fn(|_| None));
+    for (index, waker) in wakers.as_mut_slice().iter_mut().enumerate() {
+      if holds.as_slice()[index] {
+        *waker = self.lane_at(index).arrivals.wake_one();
+      }
+    }
+    let mut wakes = Wakes::new();
+    for waker in wakers.as_mut_slice() {
+      wakes.wake(waker.take());
     }
     wakes.finish();
   }
