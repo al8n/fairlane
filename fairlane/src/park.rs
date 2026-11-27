@@ -13,6 +13,10 @@ mod std_driver {
   };
   use std::{sync::Arc, task::Wake, thread};
 
+  /// The blocking calls' waker. On some targets (Windows 7's keyed events, the pthread parker) an
+  /// unpark waits for the parked thread to reach its wait. That thread holds no channel lock on
+  /// its way there, since every queue guard is let go before the poll returns `Pending`, so an
+  /// unpark can delay the wakes after it, never stop them.
   struct Unparker(thread::Thread);
 
   impl Wake for Unparker {

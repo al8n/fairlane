@@ -123,11 +123,16 @@ A channel runs three kinds of your code while it works: the `Waker`s of the task
 its `Policy`, and the destructors of its items. It has no executor of its own, so all of it runs on
 the thread of the call that set it off.
 
-- **A `Waker` must not panic, must not block, and must not call a fairlane channel operation,**
-  from `wake`, `wake_by_ref`, `clone` or `drop`: no send, receive or close, and no drop of a
-  fairlane handle or future. A wake should be prompt and only schedule its task, as executors
-  expect. A channel runs every waker outside its locks, once the state changes the wake stands for
-  are made.
+- **A `Waker` must not panic, must not block on the channel or wait for another party's progress
+  through it, and must not call a fairlane channel operation,** from `wake`, `wake_by_ref`, `clone`
+  or `drop`: no send, receive or close, and no drop of a fairlane handle or future. A wake should
+  be prompt and only schedule its task, as executors expect. A channel runs every waker outside its
+  locks, once the state changes the wake stands for are made.
+  - Fairlane's own waker, for its blocking calls, is std's `Thread::unpark`. On some targets
+    (Windows 7's keyed events, the pthread parker) an unpark waits for the parked thread to reach
+    its wait.
+  - That thread needs no channel lock to get there: every queue guard is let go before it parks.
+    So the unpark can delay the wakes after it, but never stop them.
 - **A `Policy` must not block, and must not call any channel operation, on any channel.** Its
   `stamp` and `owed`, and the clock they read, run while a channel holds its choice lock, or while
   a send holds room it has not committed. A call into a channel there may deadlock, as any callback

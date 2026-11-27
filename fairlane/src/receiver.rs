@@ -388,7 +388,9 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   ///   lookahead, and its ring alone shows what it holds.
   /// - **The lock is taken only where a receiver waits** on a lane the quota admits.
   /// - **Every lane's notification is made before any waker runs,** each then under its own
-  ///   catch, so a waker that panics, or blocks, leaves no other lane's receiver asleep.
+  ///   catch. A waker that panics leaves no other lane's receiver asleep. One that blocks for a
+  ///   while, as an unpark may, delays the wakes after it without losing them: their notifications
+  ///   are already made.
   pub(crate) fn chain(&self, quota: &Quota<L>) {
     let count = lane_count::<L>();
     let waited =

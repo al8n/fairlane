@@ -6,9 +6,10 @@
   doc = "A bounded multi-lane MPMC channel: a bound per lane, an anti-starvation policy, batched \
          receives, and both awaited and blocking doors. Built with the `derive` feature, as on \
          docs.rs, this page is the README, with its examples and the contracts your code keeps \
-         inside a channel (\"Wakers, policies and items\"): a `Waker` must not panic, block, or \
-         call into a channel; a `Policy` must not block or call into any channel; an item's \
-         `Drop` must not block on anyone who waits on the same channel. An allocation failure in \
+         inside a channel (\"Wakers, policies and items\"): a `Waker` must not panic, block on a \
+         channel or wait for another party's progress through it, or call into a channel; a \
+         `Policy` must not block or call into any channel; an item's `Drop` must not block on \
+         anyone who waits on the same channel. An allocation failure in \
          fairlane's own allocations, capacity overflow included, fails before the call changes \
          the channel or moves an item: as a panic in a call on a live channel, or as \
          `Malformed::Capacity` at construction. Allocations std makes inside its own primitives \
