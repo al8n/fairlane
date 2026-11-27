@@ -517,14 +517,15 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   /// later; the item contract makes neither order one a destructor can wait on.
   ///
   /// Only the first panic, a waker's or a destructor's, is kept, and it is resumed once every item
-  /// is dropped; every later one is disposed of at once. So the drains keep one payload, grow
-  /// nothing, and no panic of their own can stop them.
+  /// is dropped and its room given back. Every later payload is leaked, never dropped: a teardown
+  /// whose item destructors panic more than once resumes the first panic and leaks the rest. So
+  /// the drains keep one payload, grow nothing, and no payload's own drop can stop them.
   pub(crate) fn drop_receiver(&self) {
     if self.receivers.fetch_sub(1, Ordering::AcqRel) != 1 {
       return;
     }
     self.shut();
-    let mut wakes = Wakes::new();
+    let mut wakes = Wakes::leaking();
     self.dispatch_close(&mut wakes);
     // Each item is dropped after the choice lock is let go, under its own catch. The close has
     // emptied every line, so a room given back here grants no reserve. The lookahead is drained
@@ -561,8 +562,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
 }
 
 /// Drops `item` under its own catch. The panic of a destructor that panics is kept in `wakes`
-/// where it is the first, to be resumed once both drains are done, and disposed of at once
-/// otherwise.
+/// where it is the first, to be resumed once both drains are done, and leaked otherwise.
 fn contain<T>(item: T, wakes: &mut Wakes) {
   if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(move || drop(item))) {
     wakes.hold(payload);

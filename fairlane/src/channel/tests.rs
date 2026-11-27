@@ -265,6 +265,78 @@ fn disconnect_survives_a_payload_whose_drop_panics() {
   assert_eq!(tx.snapshot().received(Three::C), 2);
 }
 
+/// A destructor's panic payload whose drop waits for a channel to disconnect.
+#[derive(Debug)]
+struct Waits(std::sync::mpsc::Receiver<()>);
+
+impl Drop for Waits {
+  fn drop(&mut self) {
+    let _ = self.0.recv();
+  }
+}
+
+/// An item that panics in its drop with an integer, or with a [`Waits`], or holds the one sender a
+/// `Waits` waits on.
+#[derive(Debug)]
+enum Staggered {
+  PanicsWithInteger,
+  PanicsWithWaits(Option<Waits>),
+  Holds(Option<std::sync::mpsc::Sender<()>>),
+}
+
+impl Drop for Staggered {
+  fn drop(&mut self) {
+    match self {
+      Self::PanicsWithInteger => std::panic::panic_any(1_u8),
+      Self::PanicsWithWaits(waits) => {
+        if let Some(waits) = waits.take() {
+          std::panic::panic_any(waits);
+        }
+      }
+      // The sender goes with the item: the disconnect a `Waits` waits for.
+      Self::Holds(sender) => drop(sender.take()),
+    }
+  }
+}
+
+/// A teardown keeps its first panic and leaks every later payload, so no payload's own drop runs
+/// before the drain is done: here the second payload's drop would wait for the third item's. The
+/// drain ends, and resumes the first panic, the integer. On real threads, under a timeout.
+#[cfg_attr(miri, ignore = "real threads and a timeout")]
+#[test]
+fn a_teardown_leaks_every_payload_after_the_first() {
+  let (release, waited) = std::sync::mpsc::channel::<()>();
+  let (tx, rx) = bounded::<Staggered>(cap(3)).unwrap();
+  tx.try_send(Single, Staggered::PanicsWithInteger).unwrap();
+  tx.try_send(Single, Staggered::PanicsWithWaits(Some(Waits(waited))))
+    .unwrap();
+  tx.try_send(Single, Staggered::Holds(Some(release)))
+    .unwrap();
+  let (done, finished) = std::sync::mpsc::channel();
+  std::thread::spawn(move || {
+    let dropped = std::panic::catch_unwind(core::panic::AssertUnwindSafe(move || drop(rx)));
+    let _ = done.send(
+      dropped
+        .err()
+        .map(|payload| payload.downcast::<u8>().is_ok()),
+    );
+  });
+  let resumed = finished
+    .recv_timeout(std::time::Duration::from_secs(5))
+    .expect("the drain ended: no later payload's drop ran inside it");
+  assert_eq!(
+    resumed,
+    Some(true),
+    "the first panic, the integer, is resumed"
+  );
+  let snapshot = tx.snapshot();
+  assert_eq!(
+    (snapshot.queued(Single), snapshot.remaining(Single)),
+    (0, 3),
+    "every item dropped, and its room given back"
+  );
+}
+
 /// A sink with room for a set number of items: a batch's `Vec` that cannot grow.
 struct Cramped<L: Lane> {
   items: Vec<crate::Received<u32, L>>,
