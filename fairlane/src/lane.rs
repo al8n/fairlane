@@ -174,6 +174,16 @@ pub(crate) const fn lane_count<L: Lane>() -> usize {
   <L::N as Unsigned>::USIZE
 }
 
+/// The lane at `index`, which is below `L::N`.
+///
+/// # Panics
+///
+/// Only for a hand-written [`Lane`] whose `from_index` is not `Some` there.
+#[inline]
+pub(crate) fn lane_at<L: Lane>(index: usize) -> L {
+  L::from_index(index).unwrap_or_else(|| broken_lane::<L>(index))
+}
+
 /// `lane`'s index, checked against `L::N`: the one call into `Lane::index` a door makes, so that
 /// everything the door does after it names one lane.
 ///

@@ -13,7 +13,7 @@ use hybrid_array::Array;
 use crate::{
   arrivals::Arrivals,
   choice::Choice,
-  lane::{Lane, PerLane, Single, index_of, lane_count},
+  lane::{Lane, PerLane, Single, index_of, lane_at, lane_count},
   options::{LaneOptions, Malformed, Options},
   policy::{DefaultPolicy, Policy},
   receiver::Receiver,
@@ -158,8 +158,9 @@ pub(crate) struct Shared<T, L: Lane, Y: Policy<L>> {
   /// of lane states on the stack.
   lanes: Box<[LaneState<T, Y::Stamp>]>,
   /// Each index's lane, read once at the construction: the receiving side never calls back into
-  /// `Lane` to name an item's lane.
-  names: PerLane<L, L>,
+  /// `Lane` to name an item's lane. On the heap, built one lane at a time, as the lane states are:
+  /// a large lane type makes no large table on the stack.
+  names: Box<[L]>,
   /// Each lane's express flag, as the options resolved it.
   express: PerLane<bool, L>,
   /// The receiving side's lock, for two lanes or more: the passed-over counts and the lookahead.
@@ -207,7 +208,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     }
     Ok(Self {
       lanes: states.into_boxed_slice(),
-      names: PerLane::from_fn(|lane| lane),
+      names: (0..count).map(lane_at::<L>).collect(),
       express,
       choice: lanes.then(|| Mutex::new(Choice::new())),
       policy,
@@ -241,7 +242,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   /// The lane at `index`, as read at the construction.
   #[inline]
   pub(crate) fn name(&self, index: usize) -> L {
-    *self.names.at(index)
+    self.names[index]
   }
 
   /// Whether lane `index` is express.
