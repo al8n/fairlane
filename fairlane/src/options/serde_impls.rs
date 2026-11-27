@@ -11,9 +11,9 @@ use crate::lane::{Lane, PerLane};
 
 const FIELDS: &[&str] = &["capacity", "express"];
 
-/// A human-readable format writes a map: `capacity`, and `express` only where the options say. A
-/// format that is not self-describing reads a struct by position, so there both fields are always
-/// written, `express` as an explicit option.
+/// A human-readable format writes a map: `capacity`, and `express` only where the options say,
+/// as the `Option` it is, which the reader asks for. A format that is not self-describing reads a
+/// struct by position, so there both fields are always written, `express` as an explicit option.
 impl Serialize for LaneOptions {
   fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
     if serializer.is_human_readable() {
@@ -21,7 +21,7 @@ impl Serialize for LaneOptions {
       let mut state = serializer.serialize_struct("LaneOptions", fields)?;
       state.serialize_field("capacity", &self.capacity)?;
       match self.express {
-        Some(express) => state.serialize_field("express", &express)?,
+        Some(_) => state.serialize_field("express", &self.express)?,
         None => state.skip_field("express")?,
       }
       state.end()

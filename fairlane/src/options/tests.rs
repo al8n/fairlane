@@ -241,6 +241,42 @@ mod serde_tests {
     );
   }
 
+  /// Every presence of `express` round-trips through serde's own tokens, readable and compact: a
+  /// present `express` is written as the `Option` it is, which is what the reader asks for.
+  #[test]
+  fn serde_tokens_round_trip_every_express() {
+    use serde_test::{Configure, Token, assert_tokens};
+
+    let plain = LaneOptions::new(cap(8));
+    let head = |len| {
+      [
+        Token::Struct {
+          name: "LaneOptions",
+          len,
+        },
+        Token::Str("capacity"),
+        Token::U64(8),
+      ]
+    };
+    assert_tokens(
+      &plain.readable(),
+      &[&head(1)[..], &[Token::StructEnd]].concat(),
+    );
+    for express in [true, false] {
+      let options = plain.with_express(express);
+      let tail = [
+        Token::Str("express"),
+        Token::Some,
+        Token::Bool(express),
+        Token::StructEnd,
+      ];
+      assert_tokens(&options.readable(), &[&head(2)[..], &tail].concat());
+      assert_tokens(&options.compact(), &[&head(2)[..], &tail].concat());
+    }
+    let none = [Token::Str("express"), Token::None, Token::StructEnd];
+    assert_tokens(&plain.compact(), &[&head(2)[..], &none].concat());
+  }
+
   #[test]
   fn serde_express_may_be_missing_or_null() {
     let missing: LaneOptions = serde_json::from_str(r#"{"capacity":8}"#).unwrap();
