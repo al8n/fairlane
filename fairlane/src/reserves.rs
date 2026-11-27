@@ -9,8 +9,8 @@
 //! - **The word's flags** change only under the lock, through the line's transitions in
 //!   [`remaining`](crate::remaining): `WAITING` is set exactly while a reserve is in line.
 //! - **No user code runs under the lock.** A waker is cloned before the lock is taken; one taken
-//!   out under it is woken or dropped after it is let go. A waker can do anything there, such as
-//!   drop another reserve of this lane, which takes this lock again.
+//!   out under it is woken or dropped after it is let go. So even a waker that breaks its contract
+//!   by taking this lock again, through a fairlane call, finds it free.
 //! - **No user code runs while a place or a grant has no owner.** A reserve's [`Key`] stays in its
 //!   future across every waker clone, and leaves it only under the lock, in the step that frees its
 //!   place. Wakers a poll no longer needs go back to the caller in a [`Spare`], to be dropped once

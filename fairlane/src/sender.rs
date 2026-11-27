@@ -181,7 +181,8 @@ impl<T, L: Lane, Y: Policy<L>> Sender<T, L, Y> {
   /// the one call that closed the channel.
   ///
   /// The waiters it resolves are woken on this thread, once every lane is closed: a channel has no
-  /// executor. Their wakers must keep the crate's contract ("Wakers, policies and items").
+  /// executor. Where two closes run at once, a wake either one resolved may be delivered by the
+  /// other. Their wakers must keep the crate's contract ("Wakers, policies and items").
   #[inline]
   pub fn close(&self) -> bool {
     self.shared.close()

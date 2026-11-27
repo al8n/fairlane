@@ -281,8 +281,8 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   /// also where the policy's `stamp` unwinds before the commit.
   pub(crate) fn commit(&self, index: usize, item: T) -> Result<(), T> {
     let state = self.lane_at(index);
-    // Declared after `item`, so that an unwind out of `stamp` gives the room back before the item
-    // is dropped: a destructor that waits for a sender this room is granted to can then end.
+    // Declared after `item`, so that an unwind out of `stamp` gives the room back, and grants it,
+    // before the item is dropped, as a refund after a commit does.
     let refund = Refund(state);
     // Taken here, before the item moves into the push, for the same reason. The push calls its
     // closure only where this found the ring taking stamps, so its fallback never runs.
@@ -494,10 +494,10 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   /// The last receiver gone closes the channel and lets go of every queued item, each dropped
   /// under its own catch, so that one destructor that panics does not leak the rest.
   ///
-  /// What the close wakes is woken first, before any item's destructor runs: a destructor may wait
-  /// for a thread that waits on this channel, such as a producer it joins, and that thread returns
-  /// only once it is woken. A waker's panic is held until every item and every caught panic is
-  /// disposed of, and raised then.
+  /// The wakes this close resolves run before the destructors of the items it drops. A wake that a
+  /// concurrent close took from its waiter's place first is that close's to deliver, and may run
+  /// later; the item contract makes neither order one a destructor can wait on. A waker's panic is
+  /// held until every item and every caught panic is disposed of, and raised then.
   pub(crate) fn drop_receiver(&self) {
     if self.receivers.fetch_sub(1, Ordering::AcqRel) != 1 {
       return;

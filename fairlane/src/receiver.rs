@@ -24,9 +24,10 @@ use crate::{
 };
 
 /// The receiving half of a channel. Clones share the channel: each item goes to one receive.
-/// The last one dropped closes the channel and lets go of what is queued, on its own thread: the
-/// wakers of what the close resolves run first, then the items' destructors. A destructor must not
-/// block on anyone who waits on this channel (the crate's documentation, "Wakers, policies and
+/// The last one dropped closes the channel and lets go of what is queued, on its own thread. It
+/// runs the wakes its own close resolves before the destructors of the items it drops; a wake that
+/// a concurrent close is delivering may run later. No destructor may rely on either order: it must
+/// not block on anyone who waits on this channel (the crate's documentation, "Wakers, policies and
 /// items").
 pub struct Receiver<T, L: Lane = Single, Y: Policy<L> = DefaultPolicy<L>> {
   shared: Arc<Shared<T, L, Y>>,
