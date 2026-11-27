@@ -199,6 +199,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
       }
       granted.room();
       let Some(popped) = state.ring.pop() else {
+        granted.unroom();
         break;
       };
       // The room goes back first, and the item to the sink. The wakers of the reserves the
@@ -344,7 +345,10 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
         Some(popped) => popped,
         None => match state.ring.pop() {
           Some(popped) => popped,
-          None => break,
+          None => {
+            back.granted.unroom();
+            break;
+          }
         },
       };
       if state.lookahead {

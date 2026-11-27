@@ -146,6 +146,13 @@ impl Staged {
     self.made += 1;
   }
 
+  /// Gives back the last place made, where the item it was made for was not there to take: a
+  /// missed pop grows nothing.
+  pub(crate) fn unroom(&mut self) {
+    debug_assert!(self.used < self.made, "an unused place was made");
+    self.made -= 1;
+  }
+
   /// Keeps the waker an item taken produced, where it produced one, in the place made for it.
   pub(crate) fn keep(&mut self, waker: Option<Waker>) {
     debug_assert!(self.used < self.made, "a place was made first");
@@ -230,3 +237,6 @@ impl Drop for Spare {
     wakes.finish();
   }
 }
+
+#[cfg(test)]
+mod tests;
