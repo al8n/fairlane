@@ -9,15 +9,50 @@ use serde_core::{
 
 use super::{Lane, PerLane, lane_count};
 
+/// A map keyed by each lane's name. Every name is checked before anything is written: two lanes of
+/// one name would be written as one key twice, which a reader keeps only once, so such a table is
+/// refused, by that name.
 impl<T: Serialize, L: Lane> Serialize for PerLane<T, L> {
   fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-    let mut map = serializer.serialize_map(Some(lane_count::<L>()))?;
+    let count = lane_count::<L>();
+    for index in 0..count {
+      let lane =
+        L::from_index(index).ok_or_else(|| ser::Error::custom(BrokenLane::<L>::at(index)))?;
+      let name = lane.as_str();
+      if let Some(first) =
+        (0..index).find(|&earlier| L::from_index(earlier).is_some_and(|it| it.as_str() == name))
+      {
+        return Err(ser::Error::custom(SharedName {
+          name,
+          first,
+          second: index,
+        }));
+      }
+    }
+    let mut map = serializer.serialize_map(Some(count))?;
     for (index, value) in self.as_slice().iter().enumerate() {
       let lane =
         L::from_index(index).ok_or_else(|| ser::Error::custom(BrokenLane::<L>::at(index)))?;
       map.serialize_entry(lane.as_str(), value)?;
     }
     map.end()
+  }
+}
+
+/// Two lanes that answer one name from `as_str`.
+struct SharedName<'a> {
+  name: &'a str,
+  first: usize,
+  second: usize,
+}
+
+impl fmt::Display for SharedName<'_> {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(
+      f,
+      "lanes {} and {} are both named `{}`: a table keyed by name cannot tell them apart",
+      self.first, self.second, self.name
+    )
   }
 }
 

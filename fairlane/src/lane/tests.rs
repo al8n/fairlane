@@ -155,6 +155,48 @@ mod serde_tests {
     );
   }
 
+  /// A hand-written lane whose two lanes answer one name.
+  #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+  enum Twins {
+    First,
+    Second,
+  }
+
+  impl Lane for Twins {
+    type N = typenum::U2;
+
+    fn index(self) -> usize {
+      self as usize
+    }
+
+    fn from_index(index: usize) -> Option<Self> {
+      [Self::First, Self::Second].get(index).copied()
+    }
+
+    fn as_str(self) -> &'static str {
+      "twin"
+    }
+  }
+
+  #[test]
+  fn serde_refuses_two_lanes_of_one_name_before_writing() {
+    let table = PerLane::<u32, Twins>::from_fn(|lane| lane.index() as u32);
+    let mut written = Vec::new();
+    let error =
+      serde_core::Serialize::serialize(&table, &mut serde_json::Serializer::new(&mut written))
+        .unwrap_err();
+    assert!(
+      error
+        .to_string()
+        .contains("lanes 0 and 1 are both named `twin`"),
+      "{error}"
+    );
+    assert!(written.is_empty(), "nothing is written");
+    let options =
+      crate::Options::<Twins>::from_fn(|_| crate::LaneOptions::new(core::num::NonZeroUsize::MIN));
+    assert!(serde_json::to_string(&options).is_err(), "nor any options");
+  }
+
   #[test]
   fn serde_refuses_a_duplicate_lane() {
     let error = serde_json::from_str::<PerLane<u32, Urgency>>(

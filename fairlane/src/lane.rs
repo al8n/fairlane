@@ -41,7 +41,8 @@ pub trait Lane: Copy + Eq + fmt::Debug + Send + Sync + 'static {
   /// The lane at `index`, or `None` from `N` on.
   fn from_index(index: usize) -> Option<Self>;
 
-  /// The lane's name: a label, and the key a configuration file uses for it.
+  /// The lane's name: a label, and the key a configuration file uses for it. Each lane's is its
+  /// own: a table of a vocabulary with two lanes of one name is refused when it is serialized.
   fn as_str(self) -> &'static str;
 
   /// Whether the lane is express unless its options say otherwise.
