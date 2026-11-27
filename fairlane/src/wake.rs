@@ -20,28 +20,12 @@ use std::{
 pub(crate) struct Wakes {
   /// The first panic held.
   panic: Option<Box<dyn Any + Send>>,
-  /// Whether a later panic is leaked rather than disposed of: a teardown's, whose drain no
-  /// payload's own drop may stop.
-  leak: bool,
 }
 
 impl Wakes {
   #[inline]
   pub(crate) const fn new() -> Self {
-    Self {
-      panic: None,
-      leak: false,
-    }
-  }
-
-  /// Wakes whose later panics are leaked, never dropped: for a teardown's drain, so that no
-  /// payload's drop runs before every item is dropped, and nothing grows.
-  #[inline]
-  pub(crate) const fn leaking() -> Self {
-    Self {
-      panic: None,
-      leak: true,
-    }
+    Self { panic: None }
   }
 
   /// Wakes `waker`, where there is one.
@@ -66,13 +50,11 @@ impl Wakes {
     }
   }
 
-  /// Keeps `panic` where it is the first, to be raised by [`finish`](Self::finish). A later one is
-  /// disposed of at once, or, for [`leaking`](Self::leaking) wakes, leaked. One payload is kept, so
-  /// nothing grows.
-  pub(crate) fn hold(&mut self, panic: Box<dyn Any + Send>) {
+  /// Keeps `panic` where it is the first, to be raised by [`finish`](Self::finish); disposes of
+  /// it at once otherwise.
+  fn hold(&mut self, panic: Box<dyn Any + Send>) {
     match self.panic {
       None => self.panic = Some(panic),
-      Some(_) if self.leak => core::mem::forget(panic),
       Some(_) => dispose(panic),
     }
   }

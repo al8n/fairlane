@@ -3,7 +3,6 @@
 use core::{
   mem,
   num::NonZeroUsize,
-  panic::AssertUnwindSafe,
   task::{Poll, Waker},
 };
 
@@ -509,30 +508,60 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     self.receivers.fetch_add(1, Ordering::Relaxed);
   }
 
-  /// The last receiver gone closes the channel and lets go of every queued item, each dropped
-  /// under its own catch, so that one destructor that panics does not leak the rest.
+  /// The last receiver gone closes the channel and lets go of every queued item, as a `Vec` drops
+  /// its items: where a destructor panics, the panic unwinds out of this call, and the rest are
+  /// still dropped, and their room given back, while it unwinds. A second destructor that panics
+  /// then aborts the process, as Rust does.
   ///
   /// The wakes this close resolves run before the destructors of the items it drops. A wake that a
   /// concurrent close took from its waiter's place first is that close's to deliver, and may run
   /// later; the item contract makes neither order one a destructor can wait on.
-  ///
-  /// Only the first panic, a waker's or a destructor's, is kept, and it is resumed once every item
-  /// is dropped and its room given back. Every later payload is leaked, never dropped: a teardown
-  /// whose item destructors panic more than once resumes the first panic and leaks the rest. So
-  /// the drains keep one payload, grow nothing, and no payload's own drop can stop them.
   pub(crate) fn drop_receiver(&self) {
     if self.receivers.fetch_sub(1, Ordering::AcqRel) != 1 {
       return;
     }
     self.shut();
-    let mut wakes = Wakes::leaking();
+    let mut wakes = Wakes::new();
     self.dispatch_close(&mut wakes);
-    // Each item is dropped after the choice lock is let go, under its own catch. The close has
-    // emptied every line, so a room given back here grants no reserve. The lookahead is drained
-    // one lane at a time, the lock taken for each, so that nothing is collected.
-    if let Some(choice) = &self.choice {
+    // Each item is dropped with every lock let go. The close has emptied every line, so a room
+    // given back here grants no reserve.
+    let mut drain = Drain {
+      left: Leftovers {
+        shared: self,
+        ahead: 0,
+        ring: 0,
+      },
+    };
+    while let Some(item) = drain.left.next(&mut wakes) {
+      drop(item);
+    }
+    // Nothing is left: its drop finds nothing.
+    drop(drain);
+    wakes.finish();
+  }
+}
+
+/// What a teardown has left: the lookahead's items, then each ring's, each answered with its room
+/// given back and every lock let go.
+struct Leftovers<'a, T, L: Lane, Y: Policy<L>> {
+  shared: &'a Shared<T, L, Y>,
+  /// The next lookahead slot to look at; past the last, the rings'.
+  ahead: usize,
+  /// The next ring to drain.
+  ring: usize,
+}
+
+impl<T, L: Lane, Y: Policy<L>> Leftovers<'_, T, L, Y> {
+  /// The next item left, `None` once every lane is empty. The waker of a reserve its room is
+  /// granted to goes to `wakes`.
+  fn next(&mut self, wakes: &mut Wakes) -> Option<T> {
+    let shared = self.shared;
+    if let Some(choice) = &shared.choice {
       // No re-entry check: a receive inside this choice borrows a live receiver, so none is last.
-      for (index, state) in self.lanes.iter().enumerate() {
+      while let Some(state) = shared.lanes.get(self.ahead) {
+        let index = self.ahead;
+        // A slot holds one item at most.
+        self.ahead += 1;
         let popped = {
           let mut choice = lock(choice);
           let popped = choice.ahead[index].take();
@@ -543,29 +572,38 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
         };
         if let Some(popped) = popped {
           wakes.wake(state.release());
-          contain(popped.item, &mut wakes);
+          return Some(popped.item);
         }
       }
     }
-    for state in self.lanes.iter() {
-      while let Some(popped) = state.ring.pop() {
+    while let Some(state) = shared.lanes.get(self.ring) {
+      if let Some(popped) = state.ring.pop() {
         if state.lookahead {
           state.taken.store(popped.ordinal + 1, Ordering::Relaxed);
         }
         wakes.wake(state.release());
-        contain(popped.item, &mut wakes);
+        return Some(popped.item);
       }
+      self.ring += 1;
     }
-    // The first panic, resumed now that every item is dropped.
-    wakes.finish();
+    None
   }
 }
 
-/// Drops `item` under its own catch. The panic of a destructor that panics is kept in `wakes`
-/// where it is the first, to be resumed once both drains are done, and leaked otherwise.
-fn contain<T>(item: T, wakes: &mut Wakes) {
-  if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(move || drop(item))) {
-    wakes.hold(payload);
+/// Drops what a teardown has left, as a `Vec` drops its items: where a destructor panics, its drop
+/// goes on with the rest, and gives their room back, while the panic unwinds. A second destructor
+/// that panics then aborts the process, as Rust does. After a complete drain it finds nothing.
+struct Drain<'a, T, L: Lane, Y: Policy<L>> {
+  left: Leftovers<'a, T, L, Y>,
+}
+
+impl<T, L: Lane, Y: Policy<L>> Drop for Drain<'_, T, L, Y> {
+  fn drop(&mut self) {
+    let mut wakes = Wakes::new();
+    while let Some(item) = self.left.next(&mut wakes) {
+      drop(item);
+    }
+    wakes.finish();
   }
 }
 

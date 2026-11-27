@@ -203,138 +203,64 @@ fn the_last_receiver_disconnects() {
   assert_eq!(snapshot.received(Single), 1);
 }
 
+/// The last receiver drops the queued items as a `Vec` does: where a destructor panics, the panic
+/// unwinds out of the drop, and the rest are still dropped, and their room given back.
 #[test]
-fn disconnect_drops_every_item_under_its_own_catch() {
+fn disconnect_drops_every_item_as_a_vec_does() {
   let drops = StdArc::new(AtomicUsize::new(0));
   let (tx, rx) = bounded::<Counted>(cap(4)).unwrap();
-  for panics in [false, true, false, true] {
+  for panics in [false, true, false, false] {
     tx.try_send(Single, Counted(drops.clone(), panics)).unwrap();
   }
   let hook = std::panic::take_hook();
   std::panic::set_hook(Box::new(|_| {}));
   let dropped = std::panic::catch_unwind(core::panic::AssertUnwindSafe(move || drop(rx)));
   std::panic::set_hook(hook);
-  assert_eq!(drops.load(SeqCst), 4, "every item is dropped first");
-  crate::wake::dispose(dropped.expect_err("the first destructor's panic is resumed"));
+  assert!(
+    dropped.is_err(),
+    "the destructor's panic unwinds out of the drop"
+  );
+  assert_eq!(drops.load(SeqCst), 4, "every item is dropped");
+  let snapshot = tx.snapshot();
+  assert_eq!(
+    (snapshot.queued(Single), snapshot.remaining(Single)),
+    (0, 4),
+    "and its room given back"
+  );
 }
 
-/// A payload whose own drop panics.
-struct Bomb;
-
-impl Drop for Bomb {
-  fn drop(&mut self) {
-    panic!("a panic payload whose drop panics");
-  }
-}
-
-/// Counts its drops, and panics in its drop with a payload whose drop panics too.
-struct Volatile(StdArc<AtomicUsize>);
-
-impl Drop for Volatile {
-  fn drop(&mut self) {
-    self.0.fetch_add(1, SeqCst);
-    std::panic::panic_any(Bomb);
-  }
-}
-
-/// Both drains of the last receiver's drop, the lookahead's and the rings', drop every item, though
-/// each destructor panics with a payload whose own drop panics.
+/// Both drains of the last receiver's drop, the lookahead's and the rings', go on while a
+/// destructor's panic unwinds: the lookahead's item panics, and the ring's is dropped still.
 #[test]
-fn disconnect_survives_a_payload_whose_drop_panics() {
+fn disconnect_drains_both_drains_though_a_destructor_panics() {
   use crate::testing::Three;
 
   let drops = StdArc::new(AtomicUsize::new(0));
   let options = Options::from_fn(|_| LaneOptions::new(cap(2)));
-  let (tx, rx) = channel::<Volatile, Three>(options).unwrap();
-  tx.try_send(Three::B, Volatile(drops.clone())).unwrap();
-  tx.try_send(Three::C, Volatile(drops.clone())).unwrap();
-  tx.try_send(Three::C, Volatile(drops.clone())).unwrap();
+  let (tx, rx) = channel::<Counted, Three>(options).unwrap();
+  tx.try_send(Three::B, Counted(drops.clone(), false))
+    .unwrap();
+  tx.try_send(Three::C, Counted(drops.clone(), true)).unwrap();
+  tx.try_send(Three::C, Counted(drops.clone(), false))
+    .unwrap();
   let taken = rx.try_recv().unwrap().unwrap();
   assert_eq!(
     taken.lane(),
     Three::B,
     "and C's oldest item is in the lookahead"
   );
-  let dropped = std::panic::catch_unwind(core::panic::AssertUnwindSafe(move || drop(taken)));
-  crate::wake::dispose(dropped.unwrap_err());
+  drop(taken);
   drops.store(0, SeqCst);
+  let hook = std::panic::take_hook();
+  std::panic::set_hook(Box::new(|_| {}));
   let dropped = std::panic::catch_unwind(core::panic::AssertUnwindSafe(move || drop(rx)));
+  std::panic::set_hook(hook);
+  assert!(
+    dropped.is_err(),
+    "the lookahead item's panic unwinds out of the drop"
+  );
   assert_eq!(drops.load(SeqCst), 2, "both items left were dropped");
-  // The first destructor's payload is resumed; its own drop panics, so it is disposed of here.
-  crate::wake::dispose(dropped.expect_err("the first destructor's panic is resumed"));
   assert_eq!(tx.snapshot().received(Three::C), 2);
-}
-
-/// A destructor's panic payload whose drop waits for a channel to disconnect.
-#[derive(Debug)]
-struct Waits(std::sync::mpsc::Receiver<()>);
-
-impl Drop for Waits {
-  fn drop(&mut self) {
-    let _ = self.0.recv();
-  }
-}
-
-/// An item that panics in its drop with an integer, or with a [`Waits`], or holds the one sender a
-/// `Waits` waits on.
-#[derive(Debug)]
-enum Staggered {
-  PanicsWithInteger,
-  PanicsWithWaits(Option<Waits>),
-  Holds(Option<std::sync::mpsc::Sender<()>>),
-}
-
-impl Drop for Staggered {
-  fn drop(&mut self) {
-    match self {
-      Self::PanicsWithInteger => std::panic::panic_any(1_u8),
-      Self::PanicsWithWaits(waits) => {
-        if let Some(waits) = waits.take() {
-          std::panic::panic_any(waits);
-        }
-      }
-      // The sender goes with the item: the disconnect a `Waits` waits for.
-      Self::Holds(sender) => drop(sender.take()),
-    }
-  }
-}
-
-/// A teardown keeps its first panic and leaks every later payload, so no payload's own drop runs
-/// before the drain is done: here the second payload's drop would wait for the third item's. The
-/// drain ends, and resumes the first panic, the integer. On real threads, under a timeout.
-#[cfg_attr(miri, ignore = "real threads and a timeout")]
-#[test]
-fn a_teardown_leaks_every_payload_after_the_first() {
-  let (release, waited) = std::sync::mpsc::channel::<()>();
-  let (tx, rx) = bounded::<Staggered>(cap(3)).unwrap();
-  tx.try_send(Single, Staggered::PanicsWithInteger).unwrap();
-  tx.try_send(Single, Staggered::PanicsWithWaits(Some(Waits(waited))))
-    .unwrap();
-  tx.try_send(Single, Staggered::Holds(Some(release)))
-    .unwrap();
-  let (done, finished) = std::sync::mpsc::channel();
-  std::thread::spawn(move || {
-    let dropped = std::panic::catch_unwind(core::panic::AssertUnwindSafe(move || drop(rx)));
-    let _ = done.send(
-      dropped
-        .err()
-        .map(|payload| payload.downcast::<u8>().is_ok()),
-    );
-  });
-  let resumed = finished
-    .recv_timeout(std::time::Duration::from_secs(5))
-    .expect("the drain ended: no later payload's drop ran inside it");
-  assert_eq!(
-    resumed,
-    Some(true),
-    "the first panic, the integer, is resumed"
-  );
-  let snapshot = tx.snapshot();
-  assert_eq!(
-    (snapshot.queued(Single), snapshot.remaining(Single)),
-    (0, 3),
-    "every item dropped, and its room given back"
-  );
 }
 
 /// A sink with room for a set number of items: a batch's `Vec` that cannot grow.
@@ -467,9 +393,9 @@ impl Drop for Passes {
   }
 }
 
-/// A drained item's panic payload whose drop panics with a payload of its own, and so on along a
-/// long chain, is disposed of link by link to the end: the last payload, another channel's permit,
-/// is dropped, and its room is given back.
+/// A drained item's panic unwinds out of the teardown to its caller, whose disposal of a payload
+/// whose drop panics with a payload of its own, and so on along a long chain, goes link by link to
+/// the end: the last payload, another channel's permit, is dropped, and its room is given back.
 #[test]
 fn a_disposal_drops_the_payload_its_payload_hands_on() {
   let (other, other_rx) = bounded::<u32>(cap(1)).unwrap();
@@ -480,9 +406,9 @@ fn a_disposal_drops_the_payload_its_payload_hands_on() {
   let (tx, rx) = bounded::<Passes>(cap(1)).unwrap();
   tx.try_send(Single, Passes(Some(permit))).unwrap();
   assert_eq!(other.snapshot().remaining(Single), 0);
-  // The teardown resumes the destructor's panic, the chain's first link, once the item is dropped.
+  // The destructor's panic, the chain's first link, unwinds out of the teardown.
   let dropped = std::panic::catch_unwind(core::panic::AssertUnwindSafe(move || drop(rx)));
-  crate::wake::dispose(dropped.expect_err("the destructor's panic is resumed"));
+  crate::wake::dispose(dropped.expect_err("the destructor's panic unwinds to the caller"));
   assert_eq!(
     other.snapshot().remaining(Single),
     1,
