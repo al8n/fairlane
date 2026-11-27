@@ -12,11 +12,15 @@
 
 use core::cell::RefCell;
 
-use crate::sync::thread_local;
-
-thread_local! {
-  /// The channels whose choice lock this thread holds, by address: more than one only where a
-  /// policy of one channel receives from another.
+// The channels whose choice lock this thread holds, by address: more than one only where a policy
+// of one channel receives from another. Under loom, loom's thread-local, one per modelled thread;
+// its macro takes no `const` initializer.
+#[cfg(not(loom))]
+std::thread_local! {
+  static CHOOSING: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+#[cfg(loom)]
+loom::thread_local! {
   static CHOOSING: RefCell<Vec<usize>> = RefCell::new(Vec::new());
 }
 
