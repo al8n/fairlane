@@ -176,6 +176,11 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     let mut held = 0;
     let mut granted = Staged::new();
     while fits(held, quota.limit(), lane_limit) {
+      // A lane with no item asks the sink for no room: the first room may panic, and an empty or
+      // ended lane must answer as such.
+      if held == 0 && state.ring.is_empty() {
+        break;
+      }
       // Room for the item, and a place for the waker its room may be granted to, are both made
       // before the item leaves its lane: after the pop nothing can fail.
       if !sink.room(held == 0) || !granted.room() {

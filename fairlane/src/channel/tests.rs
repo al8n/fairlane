@@ -464,6 +464,42 @@ fn a_batch_wakes_every_reserve_it_grants() {
   }
 }
 
+/// A sink that can make no room at all: it panics when asked, as a `Vec` at its limit does.
+struct NoRoom;
+
+impl<L: Lane> crate::receiver::Sink<u32, L> for NoRoom {
+  fn room(&mut self, _: bool) -> bool {
+    panic!("no room");
+  }
+
+  fn put(&mut self, _: crate::Received<u32, L>) {
+    unreachable!("no room was made");
+  }
+}
+
+/// A receive of an empty or ended lane asks its sink for no room: it answers empty, or ended.
+#[test]
+fn an_empty_lane_asks_its_sink_for_no_room() {
+  use crate::{receiver::Took, testing::Three};
+
+  let (tx, _rx) = bounded::<u32>(cap(1)).unwrap();
+  assert!(matches!(
+    tx.shared().take(&Quota::up_to(4), &mut NoRoom),
+    Took::Nothing
+  ));
+  tx.close();
+  assert!(matches!(
+    tx.shared().take(&Quota::up_to(4), &mut NoRoom),
+    Took::Ended
+  ));
+
+  let (tx, _rx) = channel::<u32, Three>(Options::from_fn(|_| LaneOptions::new(cap(1)))).unwrap();
+  assert!(matches!(
+    tx.shared().take(&Quota::up_to(4), &mut NoRoom),
+    Took::Nothing
+  ));
+}
+
 #[test]
 fn snapshot_reads_each_lane() {
   let (tx, rx) = bounded::<u32>(cap(4)).unwrap();
