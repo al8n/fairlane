@@ -204,6 +204,51 @@ fn elapsed_keeps_the_largest_wait_apart_from_none() {
   assert_eq!(policy.owed(&view), Some(Three::C), "one nanosecond over");
 }
 
+/// One writer's settings `Some(20 ns)`, then `None`, then `Some(10 ns)` are never seen out of
+/// order: neither by `max_wait`, nor by the choices, which serve B, waited 15 ns, only under the
+/// last.
+#[test]
+fn elapsed_settings_are_seen_in_the_order_they_were_made() {
+  let rounds = if cfg!(miri) { 8 } else { 2_000 };
+  let view = LaneView::<Three, Moment>::new(Moment::from_nanos(15))
+    .with_lane(Three::A, 1, Some(Moment::from_nanos(15)), 0)
+    .with_lane(Three::B, 1, Some(Moment::from_nanos(0)), 0);
+  let stage = |wait: Option<Duration>| match wait {
+    Some(wait) if wait == Duration::from_nanos(20) => 0,
+    None => 1,
+    Some(wait) if wait == Duration::from_nanos(10) => 2,
+    Some(other) => panic!("no call set {other:?}"),
+  };
+  for _ in 0..rounds {
+    let policy = std::sync::Arc::new(Elapsed::<Three>::new(Duration::from_nanos(20)));
+    let writer = {
+      let policy = policy.clone();
+      std::thread::spawn(move || {
+        policy.set_max_wait(Three::B, None);
+        policy.set_max_wait(Three::B, Some(Duration::from_nanos(10)));
+      })
+    };
+    let (mut read, mut served) = (0, false);
+    while read < 2 || !served {
+      let now = stage(policy.max_wait(Three::B));
+      assert!(
+        now >= read,
+        "`max_wait` went back from stage {read} to {now}"
+      );
+      assert!(
+        !served || now == 2,
+        "`max_wait` read behind a choice already served"
+      );
+      read = now;
+      let owed = policy.owed(&view) == Some(Three::B);
+      assert!(owed || !served, "a choice went back from the 10 ns wait");
+      served |= owed;
+      std::thread::yield_now();
+    }
+    writer.join().unwrap();
+  }
+}
+
 #[test]
 fn elapsed_default_is_the_constant() {
   let policy = Elapsed::<Three>::default();

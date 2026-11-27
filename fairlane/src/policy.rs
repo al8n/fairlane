@@ -1,7 +1,7 @@
 use core::{
   fmt,
   num::NonZeroU32,
-  sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+  sync::atomic::{AtomicU32, AtomicU64, Ordering},
   time::Duration,
 };
 
@@ -342,7 +342,10 @@ impl<L: Lane> Policy<L> for PassLimit<L> {
 /// waited longer than `max_wait`, the next receive that reads the lane serves it, or serves a lane
 /// more overdue.
 ///
-/// The waits are live: [`set_max_wait`](Self::set_max_wait) takes effect at the next choice.
+/// The waits are live: [`set_max_wait`](Self::set_max_wait) takes effect at the next choice. A
+/// choice reads each wait from one atomic, without blocking, so the settings of a lane are seen in
+/// the order they were made. [`max_wait`](Self::max_wait) reads the setting itself, under a lock
+/// its setters share.
 ///
 /// A wait is kept in whole nanoseconds, and reads back exactly as set up to `u64::MAX` of them,
 /// about 584 years. A longer one is kept, and read back, as `u64::MAX` nanoseconds: no wait a
@@ -352,40 +355,56 @@ pub struct Elapsed<L: Lane, C = Monotonic> {
   clock: C,
 }
 
-/// One lane's longest wait. Having none is kept apart from the wait itself, so that every wait,
-/// the largest included, reads back as it was set.
+/// One lane's longest wait.
 struct MaxWait {
-  nanos: AtomicU64,
-  /// The lane has no wait, and may starve.
-  none: AtomicBool,
+  /// What a choice reads: the wait in nanoseconds, [`NO_WAIT`] for none. One atomic, stored only
+  /// under `set`'s lock, so its stores follow the settings' order and a reader's loads keep it.
+  threshold: AtomicU64,
+  /// The setting as made, apart from the largest wait, for `max_wait`.
+  set: std::sync::Mutex<Option<u64>>,
 }
+
+/// A lane with no wait. It schedules as a wait of `u64::MAX` nanoseconds does: no wait a
+/// [`Moment`] can measure exceeds it.
+const NO_WAIT: u64 = u64::MAX;
 
 impl MaxWait {
   fn new(max_wait: Option<Duration>) -> Self {
+    let nanos = max_wait.map(saturating_nanos);
     let wait = Self {
-      nanos: AtomicU64::new(0),
-      none: AtomicBool::new(true),
+      threshold: AtomicU64::new(nanos.unwrap_or(NO_WAIT)),
+      set: std::sync::Mutex::new(nanos),
     };
-    wait.set(max_wait);
+    // Locked once here: std's `Mutex` may allocate its native mutex at its first lock.
+    drop(wait.lock());
     wait
   }
 
-  /// A setting of `None` leaves the nanoseconds as they were: a reader racing it reads either
-  /// setting, never a wait no call set.
-  fn set(&self, max_wait: Option<Duration>) {
-    match max_wait {
-      Some(wait) => {
-        self.nanos.store(saturating_nanos(wait), Ordering::Relaxed);
-        // `Release`: a reader that sees the wait (`Acquire`) reads these nanoseconds, or later ones.
-        self.none.store(false, Ordering::Release);
-      }
-      None => self.none.store(true, Ordering::Relaxed),
-    }
+  fn lock(&self) -> std::sync::MutexGuard<'_, Option<u64>> {
+    self
+      .set
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
   }
 
-  /// The wait in nanoseconds, where the lane has one.
-  fn nanos(&self) -> Option<u64> {
-    (!self.none.load(Ordering::Acquire)).then(|| self.nanos.load(Ordering::Relaxed))
+  /// Replaces the setting, and publishes its threshold while the lock is held.
+  fn set(&self, max_wait: Option<Duration>) {
+    let nanos = max_wait.map(saturating_nanos);
+    let mut set = self.lock();
+    *set = nanos;
+    self
+      .threshold
+      .store(nanos.unwrap_or(NO_WAIT), Ordering::Relaxed);
+  }
+
+  /// The setting, in nanoseconds.
+  fn get(&self) -> Option<u64> {
+    *self.lock()
+  }
+
+  /// The threshold a choice compares with. Never blocks.
+  fn threshold(&self) -> u64 {
+    self.threshold.load(Ordering::Relaxed)
   }
 }
 
@@ -417,7 +436,7 @@ impl<L: Lane, C> Elapsed<L, C> {
   /// `lane`'s longest wait, where it has one: as it was set, up to `u64::MAX` nanoseconds.
   #[inline]
   pub fn max_wait(&self, lane: L) -> Option<Duration> {
-    self.max_waits.get(lane).nanos().map(Duration::from_nanos)
+    self.max_waits.get(lane).get().map(Duration::from_nanos)
   }
 
   /// Replaces `lane`'s longest wait, live: the next choice reads it.
@@ -438,7 +457,7 @@ impl<L: Lane> Default for Elapsed<L> {
 impl<L: Lane, C: fmt::Debug> fmt::Debug for Elapsed<L, C> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     let waits = PerLane::<Option<Duration>, L>::from_array(Array::from_fn(|index| {
-      self.max_waits.at(index).nanos().map(Duration::from_nanos)
+      self.max_waits.at(index).get().map(Duration::from_nanos)
     }));
     f.debug_struct("Elapsed")
       .field("max_waits", &waits)
@@ -459,9 +478,10 @@ impl<L: Lane, C: Clock> Policy<L> for Elapsed<L, C> {
     let now = view.now();
     let mut owed: Option<(L, u64)> = None;
     for lane in view.lanes() {
-      let Some(max_wait) = self.max_waits.get(lane).nanos() else {
+      let max_wait = self.max_waits.get(lane).threshold();
+      if max_wait == NO_WAIT {
         continue;
-      };
+      }
       let Some(oldest) = view.oldest(lane) else {
         continue;
       };
