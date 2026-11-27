@@ -532,10 +532,16 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   }
 }
 
-/// Drops `item` under its own catch, keeping the panic of a destructor that panics in `payloads`.
+/// Drops `item` under its own catch, keeping the panic of a destructor that panics in `payloads`,
+/// to be disposed of once both drains are done. Where `payloads` has no room for it, the panic is
+/// disposed of at once: the drain goes on either way, and allocates nothing it cannot do without.
 fn contain<T>(item: T, payloads: &mut Vec<Box<dyn Any + Send>>) {
   if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(move || drop(item))) {
-    payloads.push(payload);
+    if payloads.try_reserve(1).is_ok() {
+      payloads.push(payload);
+    } else {
+      dispose(payload);
+    }
   }
 }
 
