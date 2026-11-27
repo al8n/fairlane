@@ -253,7 +253,9 @@ fn disconnect_survives_a_payload_whose_drop_panics() {
     Three::B,
     "and C's oldest item is in the lookahead"
   );
-  std::mem::forget(taken);
+  let dropped = std::panic::catch_unwind(core::panic::AssertUnwindSafe(move || drop(taken)));
+  crate::wake::dispose(dropped.unwrap_err());
+  drops.store(0, SeqCst);
   drop(rx);
   assert_eq!(drops.load(SeqCst), 2, "both items left were dropped");
   assert_eq!(tx.snapshot().received(Three::C), 2);
