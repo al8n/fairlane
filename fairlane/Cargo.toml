@@ -54,6 +54,12 @@ workspace = true
 [lib]
 bench = false
 
+# A global allocator that refuses one request, and no harness, so that no other thread allocates.
+[[test]]
+name = "alloc_refusal"
+path = "tests/alloc_refusal.rs"
+harness = false
+
 [[test]]
 name = "derive_ui"
 path = "tests/derive_ui.rs"
