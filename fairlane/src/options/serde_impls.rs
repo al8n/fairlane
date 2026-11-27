@@ -113,6 +113,27 @@ impl Visitor<'_> for FieldVisitor {
       _ => Err(E::unknown_field(name, FIELDS)),
     }
   }
+
+  /// A field by its index, as a packed format writes it: serde's own identifier shape.
+  fn visit_u64<E: de::Error>(self, index: u64) -> Result<Field, E> {
+    match index {
+      0 => Ok(Field::Capacity),
+      1 => Ok(Field::Express),
+      _ => Err(E::invalid_value(
+        de::Unexpected::Unsigned(index),
+        &"field index 0 <= i < 2",
+      )),
+    }
+  }
+
+  /// A field by its name in bytes.
+  fn visit_bytes<E: de::Error>(self, name: &[u8]) -> Result<Field, E> {
+    match name {
+      b"capacity" => Ok(Field::Capacity),
+      b"express" => Ok(Field::Express),
+      _ => Err(E::unknown_field(&String::from_utf8_lossy(name), FIELDS)),
+    }
+  }
 }
 
 impl<L: Lane> Serialize for Options<L> {

@@ -277,6 +277,51 @@ mod serde_tests {
     assert_tokens(&plain.compact(), &[&head(2)[..], &none].concat());
   }
 
+  /// A field is read by its name, by its index, as a packed format writes it, or by its name in
+  /// bytes, as serde's own identifiers are; any other field is still refused.
+  #[test]
+  fn serde_fields_are_read_by_name_index_or_bytes() {
+    use serde_test::{Token, assert_de_tokens, assert_de_tokens_error};
+
+    let express = LaneOptions::new(cap(3)).with_express(true);
+    let head = Token::Struct {
+      name: "LaneOptions",
+      len: 2,
+    };
+    assert_de_tokens(
+      &express,
+      &[
+        head,
+        Token::U64(0),
+        Token::U64(3),
+        Token::U64(1),
+        Token::Some,
+        Token::Bool(true),
+        Token::StructEnd,
+      ],
+    );
+    assert_de_tokens(
+      &express,
+      &[
+        head,
+        Token::Bytes(b"capacity"),
+        Token::U64(3),
+        Token::Bytes(b"express"),
+        Token::Some,
+        Token::Bool(true),
+        Token::StructEnd,
+      ],
+    );
+    assert_de_tokens_error::<LaneOptions>(
+      &[head, Token::U64(2)],
+      "invalid value: integer `2`, expected field index 0 <= i < 2",
+    );
+    assert_de_tokens_error::<LaneOptions>(
+      &[head, Token::Bytes(b"urgent")],
+      "unknown field `urgent`, expected `capacity` or `express`",
+    );
+  }
+
   #[test]
   fn serde_express_may_be_missing_or_null() {
     let missing: LaneOptions = serde_json::from_str(r#"{"capacity":8}"#).unwrap();
