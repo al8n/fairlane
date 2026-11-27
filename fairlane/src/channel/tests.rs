@@ -8,6 +8,7 @@ use super::*;
 use crate::{
   Closed, Ended, Quota, RecvManyError, SendError, TryReserveError, TrySendError,
   testing::{Probe, poll_with},
+  wake::Staged,
 };
 
 fn cap(n: usize) -> NonZeroUsize {
@@ -295,7 +296,7 @@ fn a_batch_stops_where_its_sink_has_no_room() {
     room: 1,
   };
   assert!(matches!(
-    tx.shared().take(&Quota::up_to(8), &mut sink),
+    tx.shared().take(&Quota::up_to(8), &mut sink, &mut Staged::new()),
     Took::Items(held) if held.get() == 1
   ));
   assert_eq!(sink.items.len(), 1);
@@ -319,7 +320,7 @@ fn a_batch_stops_where_its_sink_has_no_room() {
     room: 2,
   };
   assert!(matches!(
-    tx.shared().take(&Quota::up_to(8), &mut sink),
+    tx.shared().take(&Quota::up_to(8), &mut sink, &mut Staged::new()),
     Took::Items(held) if held.get() == 2
   ));
   let snapshot = tx.snapshot();
@@ -484,18 +485,21 @@ fn an_empty_lane_asks_its_sink_for_no_room() {
 
   let (tx, _rx) = bounded::<u32>(cap(1)).unwrap();
   assert!(matches!(
-    tx.shared().take(&Quota::up_to(4), &mut NoRoom),
+    tx.shared()
+      .take(&Quota::up_to(4), &mut NoRoom, &mut Staged::new()),
     Took::Nothing
   ));
   tx.close();
   assert!(matches!(
-    tx.shared().take(&Quota::up_to(4), &mut NoRoom),
+    tx.shared()
+      .take(&Quota::up_to(4), &mut NoRoom, &mut Staged::new()),
     Took::Ended
   ));
 
   let (tx, _rx) = channel::<u32, Three>(Options::from_fn(|_| LaneOptions::new(cap(1)))).unwrap();
   assert!(matches!(
-    tx.shared().take(&Quota::up_to(4), &mut NoRoom),
+    tx.shared()
+      .take(&Quota::up_to(4), &mut NoRoom, &mut Staged::new()),
     Took::Nothing
   ));
 }

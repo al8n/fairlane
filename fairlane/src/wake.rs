@@ -101,8 +101,9 @@ pub(crate) fn wake(waker: Option<Waker>) {
 /// up to this many items allocates nothing for the reserves it grants room to.
 const STAGED_INLINE: usize = 8;
 
-/// The wakers of the reserves a batch grants room to, kept until the batch has taken every item
-/// and given back every unit, and woken then.
+/// The wakers of the reserves a batch grants room to, kept until the receive has taken every item,
+/// given back every unit, left its lines and chained, and woken then: by [`wake`](Self::wake), or,
+/// where it is dropped first, as on an unwind, by its drop.
 ///
 /// A place for each is made before the item that may produce it leaves its lane, so that keeping
 /// the waker once the item is out never needs memory and cannot fail. The first places are inline;
@@ -158,7 +159,7 @@ impl Staged {
   }
 
   /// Wakes every waker kept, each under its own catch, and raises the first panic again once all
-  /// have run, unless the thread is already unwinding.
+  /// have run, unless the thread is already unwinding. Its places are free again after.
   pub(crate) fn wake(&mut self) {
     let mut wakes = Wakes::new();
     for slot in &mut self.inline {
@@ -167,7 +168,16 @@ impl Staged {
     for waker in self.more.drain(..) {
       wakes.wake(Some(waker));
     }
+    self.made = 0;
+    self.used = 0;
     wakes.finish();
+  }
+}
+
+impl Drop for Staged {
+  /// A waker kept is a grant's: it is woken, never dropped unwoken.
+  fn drop(&mut self) {
+    self.wake();
   }
 }
 

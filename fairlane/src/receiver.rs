@@ -172,19 +172,32 @@ impl<T, L: Lane> Sink<T, L> for Option<Received<T, L>> {
 impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   /// One receive under `quota`, without waiting: every item it takes goes to `sink` at once, before
   /// the next choice, so an unwind out of a policy never drops an item that was taken.
-  pub(crate) fn take(&self, quota: &Quota<L>, sink: &mut impl Sink<T, L>) -> Took {
+  ///
+  /// The wakers of the reserves its units are granted to go to `granted`, and do not run here: the
+  /// caller wakes them once the receive has left its lines and run the chain, so that a granted
+  /// waker that blocks for a while holds no notification, and no chain, from another receiver.
+  pub(crate) fn take(
+    &self,
+    quota: &Quota<L>,
+    sink: &mut impl Sink<T, L>,
+    granted: &mut Staged,
+  ) -> Took {
     match self.choice() {
-      None => self.take_one_lane(quota, sink),
-      Some(choice) => self.take_lanes(choice, quota, sink),
+      None => self.take_one_lane(quota, sink, granted),
+      Some(choice) => self.take_lanes(choice, quota, sink, granted),
     }
   }
 
   /// A channel of one lane: pops, and no lock.
-  fn take_one_lane(&self, quota: &Quota<L>, sink: &mut impl Sink<T, L>) -> Took {
+  fn take_one_lane(
+    &self,
+    quota: &Quota<L>,
+    sink: &mut impl Sink<T, L>,
+    granted: &mut Staged,
+  ) -> Took {
     let state = self.lane_at(0);
     let lane_limit = quota.limit_at(0);
     let mut held = 0;
-    let mut granted = Staged::new();
     while fits(held, quota.limit(), lane_limit) {
       // A lane with no item asks the sink for no room: the first room may panic, and an empty or
       // ended lane must answer as such.
@@ -200,8 +213,8 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
         break;
       };
       // The room goes back first, and the item to the sink. The wakers of the reserves the
-      // batch's rooms are granted to run once the whole batch is taken, so a waker that panics, or
-      // blocks, costs no item and holds back no room.
+      // batch's rooms are granted to are the caller's, to run once the receive has left its lines
+      // and chained, so a waker that panics, or blocks, costs no item and holds back no room.
       granted.keep(state.release());
       sink.put(Received {
         item: popped.item,
@@ -210,7 +223,6 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
       });
       held += 1;
     }
-    granted.wake();
     match NonZeroUsize::new(held) {
       Some(held) => Took::Items(held),
       None if state.ring.is_ended() => Took::Ended,
@@ -248,13 +260,14 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     choice: &Mutex<Choice<T, L, Y::Stamp>>,
     quota: &Quota<L>,
     sink: &mut impl Sink<T, L>,
+    granted: &mut Staged,
   ) -> Took {
     let count = lane_count::<L>();
     // Declared first, so that it is dropped last: unlocked and unmarked.
     let mut back = RoomBack {
       shared: self,
       units: PerLane::filled(0),
-      granted: Staged::new(),
+      granted,
     };
     reentry::refuse(self.address(), "received");
     let mut guard = lock(choice);
@@ -391,6 +404,9 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
   ///   catch. A waker that panics leaves no other lane's receiver asleep. One that blocks for a
   ///   while, as an unpark may, delays the wakes after it without losing them: their notifications
   ///   are already made.
+  /// - **It runs before the take's granted wakers,** which wait for it ([`take`](Self::take)): a
+  ///   granted waker that blocks for a while delays only the wakes staged after it in that take,
+  ///   and leaves no receiver asleep.
   pub(crate) fn chain(&self, quota: &Quota<L>) {
     let count = lane_count::<L>();
     let waited =
@@ -459,13 +475,14 @@ impl<T, L: Lane, Y: Policy<L>> Drop for Unwind<'_, T, L, Y> {
 
 /// The room of the items one receive took, given back when it is dropped: after the choice lock.
 ///
-/// Every unit is given back before any waker runs, and the wakers of the reserves the units are
-/// granted to are then woken, each under its own catch. Each waker's place was made before its
-/// item was taken ([`Staged`]), so keeping it cannot fail.
+/// Every unit is given back, and the wakers of the reserves the units are granted to are kept in
+/// the caller's [`Staged`], each in a place made before its item was taken, so keeping it cannot
+/// fail. None runs here: the caller wakes them once the receive has left its lines and chained, or,
+/// on an unwind, the `Staged` does as it is dropped, after the receive's guard.
 struct RoomBack<'a, T, L: Lane, Y: Policy<L>> {
   shared: &'a Shared<T, L, Y>,
   units: PerLane<usize, L>,
-  granted: Staged,
+  granted: &'a mut Staged,
 }
 
 impl<T, L: Lane, Y: Policy<L>> Drop for RoomBack<'_, T, L, Y> {
@@ -475,7 +492,6 @@ impl<T, L: Lane, Y: Policy<L>> Drop for RoomBack<'_, T, L, Y> {
         self.granted.keep(self.shared.lane_at(index).release());
       }
     }
-    self.granted.wake();
   }
 }
 
@@ -545,9 +561,11 @@ impl<T, L: Lane, Y: Policy<L>> Receiver<T, L, Y> {
     if !quota.admits_any() {
       return Err(RecvManyError::EmptyQuota);
     }
-    match self.shared.take(&quota, into) {
+    let mut granted = Staged::new();
+    match self.shared.take(&quota, into, &mut granted) {
       Took::Items(held) => {
         self.shared.chain(&quota);
+        granted.wake();
         Ok(held.get())
       }
       Took::Nothing => Ok(0),
@@ -615,9 +633,11 @@ impl<T, L: Lane, Y: Policy<L>> Receiver<T, L, Y> {
   pub fn try_recv(&self) -> Result<Option<Received<T, L>>, Ended> {
     let quota = Quota::up_to(1);
     let mut slot = None;
-    match self.shared.take(&quota, &mut slot) {
+    let mut granted = Staged::new();
+    match self.shared.take(&quota, &mut slot, &mut granted) {
       Took::Items(_) => {
         self.shared.chain(&quota);
+        granted.wake();
         Ok(slot)
       }
       Took::Nothing => Ok(None),
@@ -779,6 +799,9 @@ impl<L: Lane> Arrival<L> {
     if !quota.admits_any() {
       return Poll::Ready(Err(RecvManyError::EmptyQuota));
     }
+    // Declared first, so that on an unwind it is dropped last: the granted reserves are woken once
+    // the guard below has left the lines and chained.
+    let mut granted = Staged::new();
     let mut wakes = Wakes::new();
     // Declared after `wakes`, so that an unwind leaves the lines before the wakers `wakes` holds
     // are dropped.
@@ -790,7 +813,7 @@ impl<L: Lane> Arrival<L> {
       armed: true,
     };
     let polled = loop {
-      let took = shared.take(quota, sink);
+      let took = shared.take(quota, sink, &mut granted);
       unwind.spent = false;
       let arrival = &mut *unwind.arrival;
       match took {
@@ -817,6 +840,8 @@ impl<L: Lane> Arrival<L> {
     };
     unwind.armed = false;
     drop(unwind);
+    // After the receive has left its lines and chained.
+    granted.wake();
     wakes.finish();
     polled
   }

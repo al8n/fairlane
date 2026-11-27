@@ -390,7 +390,8 @@ fn ma8_a_chain_sees_an_item_moving_into_the_lookahead() {
       let tx = tx.clone();
       thread::spawn(move || {
         let mut slot = None;
-        tx.shared().take(&Quota::up_to(1), &mut slot);
+        tx.shared()
+          .take(&Quota::up_to(1), &mut slot, &mut crate::wake::Staged::new());
         assert_eq!(slot.map(|received| received.lane()), Some(Three::A));
         tx
       })

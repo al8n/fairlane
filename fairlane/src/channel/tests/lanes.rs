@@ -585,3 +585,86 @@ fn either_left_chooses_as_its_policy_does() {
     first_served(Peeks)
   );
 }
+
+/// A waker that, the first time it is woken, waits until the gate is opened: a producer's waker
+/// that blocks for a while, short of blocking on the channel.
+struct Gate {
+  woken: AtomicBool,
+  open: AtomicBool,
+}
+
+impl std::task::Wake for Gate {
+  fn wake(self: StdArc<Self>) {
+    self.wake_by_ref();
+  }
+
+  fn wake_by_ref(self: &StdArc<Self>) {
+    if !self.woken.swap(true, Ordering::SeqCst) {
+      while !self.open.load(Ordering::SeqCst) {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+      }
+    }
+  }
+}
+
+/// A receive wakes the reserve its take granted only after it has left its lines and chained: a
+/// granted waker that blocks for a while leaves no other receiver asleep beside an item. On real
+/// threads, the waker held shut while the second receiver is looked for, under a timeout.
+#[cfg_attr(miri, ignore = "real threads and a timeout")]
+#[test]
+fn a_granted_waker_that_blocks_holds_back_no_chain() {
+  use std::time::{Duration, Instant};
+
+  let (tx, rx) = channel_with::<u32, Three, _>(three(1, false), Strict).unwrap();
+  let (first_probe, first_waker) = Probe::new();
+  let (second_probe, second_waker) = Probe::new();
+  let mut first = rx.recv();
+  let mut second = rx.recv();
+  assert!(poll_with(&mut first, &first_waker).is_pending());
+  assert!(poll_with(&mut second, &second_waker).is_pending());
+  // Lane A is full, and its one commit notified the first receiver.
+  tx.try_send(Three::A, 1).unwrap();
+  let gate = StdArc::new(Gate {
+    woken: AtomicBool::new(false),
+    open: AtomicBool::new(false),
+  });
+  let gated = core::task::Waker::from(gate.clone());
+  let mut reserve = tx.reserve(Three::A);
+  assert!(
+    poll_with(&mut reserve, &gated).is_pending(),
+    "waits for A's room"
+  );
+  // B's one commit notifies the first receiver too: the oldest in B's line.
+  tx.try_send(Three::B, 2).unwrap();
+  assert!(first_probe.take());
+  assert!(!second_probe.take());
+
+  let woken = std::thread::scope(|scope| {
+    // The first receive takes A's item, by priority, and grants A's room to the reserve, whose
+    // waker then waits for the gate.
+    let taker = scope.spawn(|| poll_with(&mut first, &first_waker));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut woken = false;
+    while !woken && Instant::now() < deadline {
+      woken = second_probe.take();
+      std::thread::sleep(Duration::from_millis(1));
+    }
+    let shut = !gate.open.load(Ordering::SeqCst);
+    gate.open.store(true, Ordering::SeqCst);
+    assert!(matches!(taker.join().unwrap(), Poll::Ready(Ok(_))));
+    woken && shut
+  });
+  assert!(
+    woken,
+    "the chain woke the second receiver while the granted waker was blocked"
+  );
+  assert!(gate.woken.load(Ordering::SeqCst), "the reserve was granted");
+  assert!(matches!(
+    poll_with(&mut second, &second_waker),
+    Poll::Ready(Ok(_))
+  ));
+  assert!(matches!(
+    poll_with(&mut reserve, &gated),
+    Poll::Ready(Ok(_))
+  ));
+}
