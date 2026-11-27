@@ -421,10 +421,14 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
           // read sees it, or the close finds this future in line.
           None if self.is_closed() => break Poll::Ready(()),
           None => {
-            if let Some(new) = fresh.take() {
+            if fresh.is_some() {
+              // Room first, the clone still in `fresh`: should the room panic, the clone is
+              // dropped after the lock, not under it.
               closers.make_room();
-              *key = Some(closers.insert(new, ()));
-              break Poll::Pending;
+              if let Some(new) = fresh.take() {
+                *key = Some(closers.insert(new, ()));
+                break Poll::Pending;
+              }
             }
           }
           Some(place) => match closers.state(place) {
