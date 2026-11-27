@@ -47,8 +47,10 @@ pub(crate) struct Key {
   queue: usize,
 }
 
-struct Entry {
+struct Entry<X> {
   state: State,
+  /// The waiter's own mark: for a receive, its notification identity.
+  tag: X,
   /// `Some` while queued, and while a broadcast's wake is owed.
   waker: Option<Waker>,
   /// Whether it is on the owed list: a broadcast changed its state and left its waker here.
@@ -58,10 +60,10 @@ struct Entry {
   next: usize,
 }
 
-enum Slot {
+enum Slot<X> {
   /// Free, with the next free place.
   Vacant(usize),
-  Taken(Entry),
+  Taken(Entry<X>),
 }
 
 /// The ends of a list through the places.
@@ -85,8 +87,8 @@ enum Which {
   Owed,
 }
 
-pub(crate) struct Waiters {
-  slots: Vec<Slot>,
+pub(crate) struct Waiters<X = ()> {
+  slots: Vec<Slot<X>>,
   /// The first free place.
   vacant: usize,
   /// The queued places, oldest first.
@@ -99,7 +101,7 @@ pub(crate) struct Waiters {
   id: usize,
 }
 
-impl Waiters {
+impl<X> Waiters<X> {
   pub(crate) fn new() -> Self {
     Self {
       slots: Vec::new(),
@@ -140,15 +142,16 @@ impl Waiters {
     }
   }
 
-  /// Puts a waiter at the back of the line, with its waker, in the room
+  /// Puts a waiter at the back of the line, with its waker and its mark, in the room
   /// [`make_room`](Self::make_room) made: it allocates nothing and cannot fail.
-  pub(crate) fn insert(&mut self, waker: Waker) -> Key {
+  pub(crate) fn insert(&mut self, waker: Waker, tag: X) -> Key {
     debug_assert!(
       self.vacant != NIL || self.slots.len() < self.slots.capacity(),
       "room was made first"
     );
     let entry = Entry {
       state: State::Queued,
+      tag,
       waker: Some(waker),
       owed: false,
       prev: NIL,
@@ -203,16 +206,40 @@ impl Waiters {
   /// Notifies the oldest waiter in line: out of the line, `Notified`, and its waker taken out to be
   /// woken. `None` where nobody is in line.
   pub(crate) fn notify_oldest(&mut self) -> Option<Option<Waker>> {
-    let index = self.line.head;
-    if index == NIL {
-      return None;
-    }
+    let index = self.first_queued()?;
+    Some(self.notify_at(index, true))
+  }
+
+  /// The oldest place in line, where any is.
+  #[inline]
+  pub(crate) fn first_queued(&self) -> Option<usize> {
+    (self.line.head != NIL).then_some(self.line.head)
+  }
+
+  /// The place after `index` in line, where any is. `index` is a place in line.
+  #[inline]
+  pub(crate) fn next_queued(&self, index: usize) -> Option<usize> {
+    let next = self.entry_at(index).next;
+    (next != NIL).then_some(next)
+  }
+
+  /// The mark of the waiter at the place `index`.
+  #[inline]
+  pub(crate) fn tag_at(&self, index: usize) -> &X {
+    &self.entry_at(index).tag
+  }
+
+  /// Notifies the waiter in line at the place `index`: out of the line, and `Notified`. Its waker
+  /// is taken out, to be woken, where `take`; else it stays in its place, for its holder to drop,
+  /// since that waiter was woken already.
+  pub(crate) fn notify_at(&mut self, index: usize, take: bool) -> Option<Waker> {
+    debug_assert_eq!(self.entry_at(index).state, State::Queued);
     self.unlink(Which::Line, index);
     self.queued -= 1;
     self.notified += 1;
     let entry = self.entry_at_mut(index);
     entry.state = State::Notified;
-    Some(entry.waker.take())
+    if take { entry.waker.take() } else { None }
   }
 
   /// Notifies every waiter in line, and leaves each waker owed, for [`dispatch`] to wake.
@@ -342,21 +369,21 @@ impl Waiters {
   }
 
   #[inline]
-  fn entry(&self, key: &Key) -> &Entry {
+  fn entry(&self, key: &Key) -> &Entry<X> {
     #[cfg(debug_assertions)]
     debug_assert_eq!(key.queue, self.id, "a key used on another queue");
     self.entry_at(key.index)
   }
 
   #[inline]
-  fn entry_mut(&mut self, key: &Key) -> &mut Entry {
+  fn entry_mut(&mut self, key: &Key) -> &mut Entry<X> {
     #[cfg(debug_assertions)]
     debug_assert_eq!(key.queue, self.id, "a key used on another queue");
     self.entry_at_mut(key.index)
   }
 
   #[inline]
-  fn entry_at(&self, index: usize) -> &Entry {
+  fn entry_at(&self, index: usize) -> &Entry<X> {
     match &self.slots[index] {
       Slot::Taken(entry) => entry,
       Slot::Vacant(_) => unreachable!("a key names a taken place"),
@@ -364,7 +391,7 @@ impl Waiters {
   }
 
   #[inline]
-  fn entry_at_mut(&mut self, index: usize) -> &mut Entry {
+  fn entry_at_mut(&mut self, index: usize) -> &mut Entry<X> {
     match &mut self.slots[index] {
       Slot::Taken(entry) => entry,
       Slot::Vacant(_) => unreachable!("a key names a taken place"),
@@ -375,7 +402,7 @@ impl Waiters {
 /// Wakes every waker a broadcast left owed in `line`, [`CHUNK`] at a time: each chunk is taken out
 /// under the lock into a buffer on the stack, and woken after it. Fairlane allocates nothing here,
 /// so no allocation of its own stands between the broadcast's state changes and their wakes.
-pub(crate) fn dispatch(line: &Mutex<Waiters>, wakes: &mut Wakes) {
+pub(crate) fn dispatch<X>(line: &Mutex<Waiters<X>>, wakes: &mut Wakes) {
   loop {
     let mut chunk: [Option<Waker>; CHUNK] = [const { None }; CHUNK];
     let taken = lock(line).take_owed(&mut chunk);

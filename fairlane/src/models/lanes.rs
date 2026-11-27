@@ -381,11 +381,10 @@ fn ma8_a_chain_sees_an_item_moving_into_the_lookahead() {
     tx.try_send(Three::A, 1).unwrap();
     tx.try_send(Three::B, 2).unwrap();
     let woken = std::sync::Arc::new(Woken(Flag::new(false)));
-    let key = tx
-      .shared()
-      .lane_at(1)
-      .arrivals
-      .listen(std::task::Waker::from(woken.clone()));
+    let key = tx.shared().lane_at(1).arrivals.listen(
+      std::task::Waker::from(woken.clone()),
+      loom::sync::Arc::new(crate::arrivals::Receive::new()),
+    );
     let taker = {
       let tx = tx.clone();
       thread::spawn(move || {
@@ -409,8 +408,42 @@ fn ma8_a_chain_sees_an_item_moving_into_the_lookahead() {
       woken.0.load(Ordering::SeqCst),
       "the chain woke the receiver waiting on lane B"
     );
-    let (stored, passed) = tx.shared().lane_at(1).arrivals.leave(key, true);
-    drop((stored, passed));
+    drop(tx.shared().lane_at(1).arrivals.leave(key));
     drop((tx, rx));
+  });
+}
+
+/// A receive of lanes A and B, notified and never polled again, and a receive of lane B alone:
+/// commits to A and then B leave neither notice on the first, so the second receives B's item.
+#[test]
+fn ma10_a_notice_belongs_to_a_receive_not_to_a_lane() {
+  model(|| {
+    let options = Options::from_fn(|_| LaneOptions::new(NonZeroUsize::MIN));
+    let (tx, rx) = channel_with::<u8, Three, Strict>(options, Strict).unwrap();
+    let other = rx.clone();
+    let mut held = rx.recv();
+    assert!(
+      core::pin::Pin::new(&mut held)
+        .poll(&mut core::task::Context::from_waker(
+          core::task::Waker::noop()
+        ))
+        .is_pending()
+    );
+    let waiting = thread::spawn(move || {
+      let mut batch = Vec::new();
+      other
+        .recv_many_blocking(&mut batch, Quota::up_to(1).lanes(Three::B..=Three::B))
+        .unwrap();
+      (batch.len(), other)
+    });
+    let sender = thread::spawn(move || {
+      tx.try_send(Three::A, 1).unwrap();
+      tx.try_send(Three::B, 2).unwrap();
+      tx
+    });
+    let (taken, other) = waiting.join().unwrap();
+    assert_eq!(taken, 1);
+    drop(held);
+    drop((sender.join().unwrap(), other, rx));
   });
 }

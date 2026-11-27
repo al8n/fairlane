@@ -2,11 +2,15 @@
 //!
 //! - **A receive going to sleep** joins the line of every lane its quota admits, and is counted on
 //!   each, under each lane's lock. Then it looks again, in full.
+//! - **A notice belongs to a receive,** not to its place in one lane's line. Each pending receive
+//!   has one identity, a [`Receive`], shared by its places in every line: it holds at most one
+//!   notice, of one lane, and two receives that share a task waker are still two.
 //! - **A commit** moves the tail, then reads the count. Only where it is not zero does it take the
-//!   lock and notify the oldest receiver in line: one notice per commit, whatever notices are
-//!   outstanding, so a notified receiver whose task is busy elsewhere holds back no other receiver.
-//!   A burst of commits wakes at most one receiver per item. The count keeps a commit that nobody
-//!   waits for off the lock.
+//!   lock and give its lane's notice: to the oldest receive in line that holds none, whatever
+//!   notices are outstanding, so a notified receive whose task is busy elsewhere holds back no
+//!   other. Where every receive in line holds another lane's notice, the oldest takes this lane's,
+//!   and its own is given again in its lane ([`Shared::notify`](crate::channel)). The count keeps a
+//!   commit that nobody waits for off the lock.
 //! - **No wakeup is lost.** The count's changes and the tail's moves are `SeqCst` read-modify-writes,
 //!   and both reads are `SeqCst` loads. In the single total order `S`, if the receive's look at the
 //!   tail comes before the commit's compare-and-swap, the commit's count load comes after the
@@ -14,21 +18,63 @@
 //!   in line. That increment happens-before the load, so the commit's lock comes after the
 //!   receive's critical section and finds the receive in line, or the receive already left it,
 //!   awake. Otherwise the receive's look comes after the compare-and-swap, and sees the item.
-//! - **A notified receiver that is dropped** passes its notification to the next receiver in line,
-//!   whatever other notices are outstanding. One that woke and goes on to take spends it: the
-//!   receive that takes the items wakes the next receiver where items are left (the chain).
+//! - **A notified receive that is dropped** gives its notice again in its lane, by the same rule.
+//!   One that woke and goes on to take spends it: the receive that takes the items wakes the next
+//!   receive where items are left (the chain), by the same rule.
 
 use core::task::Waker;
 
 use crate::{
-  sync::{AtomicUsize, Mutex, Ordering, lock, pair_fence},
+  sync::{Arc, AtomicUsize, Mutex, Ordering, lock, pair_fence},
   waiters::{self, Key, State, Waiters},
   wake::Wakes,
 };
 
+/// A pending receive's notification identity, shared by its places in every lane's line.
+///
+/// One word, read and changed only by compare-and-swap, under whichever lane's lock is giving a
+/// notice: the lanes' locks differ, so one word is what keeps a receive to one notice.
+pub(crate) struct Receive {
+  /// [`FREE`], a notice's lane plus one, or [`GONE`].
+  held: AtomicUsize,
+}
+
+/// It holds no notice.
+const FREE: usize = 0;
+/// It is leaving, and takes no notice.
+const GONE: usize = usize::MAX;
+
+impl Receive {
+  pub(crate) fn new() -> Self {
+    Self {
+      held: AtomicUsize::new(FREE),
+    }
+  }
+
+  /// Leaves for good, before its places do: no line gives it a notice from now on. Answers the
+  /// lane whose notice it held, for its leave to give again.
+  pub(crate) fn leave(&self) -> Option<usize> {
+    match self.held.swap(GONE, Ordering::SeqCst) {
+      FREE | GONE => None,
+      held => Some(held - 1),
+    }
+  }
+}
+
+/// What one lane's line did with its notice.
+pub(crate) enum Notice {
+  /// A receive that held none took it: its waker, to wake.
+  Fresh(Option<Waker>),
+  /// Every receive in line held another lane's notice: the oldest took this lane's, and the lane
+  /// it names is to give its own again. No waker: that receive was woken already.
+  Moved(usize),
+  /// Nobody in line.
+  Nobody,
+}
+
 pub(crate) struct Arrivals {
   count: AtomicUsize,
-  line: Mutex<Waiters>,
+  line: Mutex<Waiters<Arc<Receive>>>,
 }
 
 impl Arrivals {
@@ -44,13 +90,13 @@ impl Arrivals {
     drop(lock(&self.line));
   }
 
-  /// Joins the line with `waker`, a clone made before the lock, and counts itself. The receive
-  /// looks again after this.
-  pub(crate) fn listen(&self, waker: Waker) -> Key {
+  /// Joins the line with `waker`, a clone made before the lock, and with the identity of its
+  /// receive, and counts itself. The receive looks again after this.
+  pub(crate) fn listen(&self, waker: Waker, receive: Arc<Receive>) -> Key {
     let key = {
       let mut line = lock(&self.line);
       line.make_room();
-      let key = line.insert(waker);
+      let key = line.insert(waker, receive);
       self.count.fetch_add(1, Ordering::SeqCst);
       key
     };
@@ -92,34 +138,63 @@ impl Arrivals {
     }
   }
 
-  /// Leaves the line. Where the receiver had been notified and is being dropped (`spend` false),
-  /// the notification goes to the next receiver in line, whatever other notices are outstanding;
-  /// where it woke and goes on to take (`spend` true), it is spent.
-  ///
-  /// Answers the waker the receiver held, to be dropped, and the waker of the receiver its
-  /// notification went to, to be woken: by the caller, once the receive has left every line.
-  #[must_use = "the wakers are to be dropped and woken"]
-  pub(crate) fn leave(&self, key: Key, spend: bool) -> (Option<Waker>, Option<Waker>) {
+  /// Leaves the line, and answers the waker its place held, to be dropped by the caller once the
+  /// receive has left every line. A notice the receive held is its identity's, given again by its
+  /// leave ([`Receive::leave`]), not by this line.
+  #[must_use = "the stored waker is to be dropped after the lock"]
+  pub(crate) fn leave(&self, key: Key) -> Option<Waker> {
     let mut line = lock(&self.line);
-    let (state, stored) = line.remove(key);
+    let (_, stored) = line.remove(key);
     self.count.fetch_sub(1, Ordering::SeqCst);
-    let passed = if state == State::Notified && !spend {
-      line.notify_oldest().flatten()
-    } else {
-      None
-    };
-    (stored, passed)
+    stored
   }
 
-  /// Notifies the oldest receiver in line, where any is in line, whatever notices are outstanding:
-  /// a notice per commit. Answers its waker, for the caller to wake.
-  #[must_use = "the notified receiver's waker is to be woken"]
-  pub(crate) fn wake_one(&self) -> Option<Waker> {
+  /// Gives lane `lane`'s notice, this line's lane: to the oldest receive in line that holds none;
+  /// else, where every receive in line holds another lane's notice, the oldest takes this one, and
+  /// its own lane is to give that one again ([`Notice::Moved`]). Under this line's lock only; no
+  /// waker runs here.
+  #[must_use = "a fresh notice's waker is to be woken"]
+  pub(crate) fn notify(&self, lane: usize) -> Notice {
     pair_fence();
     if self.count.load(Ordering::SeqCst) == 0 {
-      return None;
+      return Notice::Nobody;
     }
-    lock(&self.line).notify_oldest().flatten()
+    let mine = lane + 1;
+    let mut line = lock(&self.line);
+    loop {
+      let mut oldest_held = None;
+      let mut at = line.first_queued();
+      while let Some(index) = at {
+        match line.tag_at(index).held.compare_exchange(
+          FREE,
+          mine,
+          Ordering::SeqCst,
+          Ordering::SeqCst,
+        ) {
+          Ok(_) => return Notice::Fresh(line.notify_at(index, true)),
+          Err(held) if held != GONE && held != mine && oldest_held.is_none() => {
+            oldest_held = Some((index, held));
+          }
+          Err(_) => {}
+        }
+        at = line.next_queued(index);
+      }
+      let Some((index, held)) = oldest_held else {
+        return Notice::Nobody;
+      };
+      // Every receive in line holds a notice: the oldest takes this lane's, and the lane whose
+      // notice it held gives that one again. Where its notice moved meanwhile, the line is read
+      // again.
+      if line
+        .tag_at(index)
+        .held
+        .compare_exchange(held, mine, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+      {
+        let _ = line.notify_at(index, false);
+        return Notice::Moved(held - 1);
+      }
+    }
   }
 
   /// Notifies every waiting receiver, at a close, each wake owed, for

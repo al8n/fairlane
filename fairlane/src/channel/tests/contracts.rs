@@ -414,38 +414,49 @@ impl Policy<Three> for Moody {
   }
 }
 
-/// A woken receive whose take unwinds strands no other receiver: the notifications it held pass to
-/// the next receiver in line, which takes the item, and the receive that unwound takes the other
-/// when polled again.
+/// A woken receive whose take unwinds strands no other receiver: the notice it held passes to the
+/// next receive in line that holds none. Two commits notify the first and second receives, one
+/// notice each; the first's take unwinds, and its notice wakes the third. The second and third
+/// then take the two items, and the receive that unwound joins the lines again.
 #[test]
 fn a_receive_whose_take_unwinds_passes_its_notifications_on() {
   let options = Options::from_fn(|_| LaneOptions::new(cap(1)));
   let (tx, rx) = channel_with::<u32, Three, Moody>(options, Moody::default()).unwrap();
   let (first_probe, first_waker) = Probe::new();
   let (second_probe, second_waker) = Probe::new();
+  let (third_probe, third_waker) = Probe::new();
   let mut first = rx.recv();
   let mut second = rx.recv();
+  let mut third = rx.recv();
   assert!(poll_with(&mut first, &first_waker).is_pending());
   assert!(poll_with(&mut second, &second_waker).is_pending());
+  assert!(poll_with(&mut third, &third_waker).is_pending());
   tx.try_send(Three::B, 1).unwrap();
   tx.try_send(Three::C, 2).unwrap();
-  assert!(first_probe.take(), "the oldest receiver is notified");
-  assert!(!second_probe.take(), "and only the oldest");
+  assert!(
+    first_probe.take() && second_probe.take(),
+    "one notice per commit, to distinct receives"
+  );
+  assert!(!third_probe.take());
 
   rx.policy().armed.store(true, Ordering::SeqCst);
   let unwound = catch_unwind(AssertUnwindSafe(|| poll_with(&mut first, &first_waker)));
   rx.policy().armed.store(false, Ordering::SeqCst);
   assert!(unwound.is_err(), "the policy panicked inside the take");
   assert!(
-    second_probe.take(),
-    "the notifications passed to the next receiver"
+    third_probe.take(),
+    "the notice the first receive held passed to the third"
   );
   assert!(matches!(
     poll_with(&mut second, &second_waker),
     Poll::Ready(Ok(_))
   ));
+  assert!(matches!(
+    poll_with(&mut third, &third_waker),
+    Poll::Ready(Ok(_))
+  ));
   assert!(
-    matches!(poll_with(&mut first, &first_waker), Poll::Ready(Ok(_))),
-    "the receive that unwound takes the other item"
+    poll_with(&mut first, &first_waker).is_pending(),
+    "the receive that unwound joins the lines again"
   );
 }

@@ -11,7 +11,7 @@ use core::{
 use hybrid_array::Array;
 
 use crate::{
-  arrivals::Arrivals,
+  arrivals::{Arrivals, Notice},
   choice::{Choice, table},
   lane::{Lane, PerLane, Single, index_of, lane_at, lane_count},
   options::{LaneOptions, Malformed, Options},
@@ -305,7 +305,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
       Ok(_) => {
         // The unit is the item's room now, and the receiver's waker runs after this.
         mem::forget(refund);
-        wake(state.arrivals.wake_one());
+        wake(self.notify(index));
         Ok(())
       }
       Err(Refused::Closed(item)) => {
@@ -334,6 +334,24 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     state.reserves.dispatch(&mut wakes);
     state.arrivals.dispatch(&mut wakes);
     wakes.finish();
+  }
+
+  /// Gives lane `index`'s notice to the oldest receive in its line that holds none, and answers
+  /// that receive's waker, for the caller to wake. Where every receive in the line holds a notice
+  /// already, the oldest takes this lane's instead, and the notice it held is given again in its
+  /// own lane, and so on, at most once per lane (the arrivals module). One lane's lock is held at a
+  /// time, and no waker runs here.
+  pub(crate) fn notify(&self, index: usize) -> Option<Waker> {
+    let mut visited = PerLane::<bool, L>::filled(false);
+    let mut lane = index;
+    loop {
+      visited.as_mut_slice()[lane] = true;
+      match self.lane_at(lane).arrivals.notify(lane) {
+        Notice::Fresh(waker) => return waker,
+        Notice::Moved(from) if !visited.as_slice()[from] => lane = from,
+        Notice::Moved(_) | Notice::Nobody => return None,
+      }
+    }
   }
 
   /// Closes every lane, in index order: its room first, so that no reserve is granted, then its
@@ -406,7 +424,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
           None => {
             if let Some(new) = fresh.take() {
               closers.make_room();
-              *key = Some(closers.insert(new));
+              *key = Some(closers.insert(new, ()));
               break Poll::Pending;
             }
           }

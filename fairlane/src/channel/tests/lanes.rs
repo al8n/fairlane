@@ -608,45 +608,48 @@ impl std::task::Wake for Gate {
 }
 
 /// A receive wakes the reserve its take granted only after it has left its lines and chained: a
-/// granted waker that blocks for a while leaves no other receiver asleep beside an item. On real
-/// threads, the waker held shut while the second receiver is looked for, under a timeout.
+/// granted waker that blocks for a while leaves no other receiver asleep beside an item.
+///
+/// Receive R of every lane holds B's notice, and T, of A alone, holds A's. R takes A's item, by
+/// priority, so it spends B's notice on A: only the chain can wake U, of B alone, for B's item.
+/// R's take grants A's room to a reserve whose waker blocks until the gate opens, and U must be
+/// woken while it is still shut. On real threads, under a timeout.
 #[cfg_attr(miri, ignore = "real threads and a timeout")]
 #[test]
 fn a_granted_waker_that_blocks_holds_back_no_chain() {
   use std::time::{Duration, Instant};
 
   let (tx, rx) = channel_with::<u32, Three, _>(three(1, false), Strict).unwrap();
-  let (first_probe, first_waker) = Probe::new();
-  let (second_probe, second_waker) = Probe::new();
-  let mut first = rx.recv();
-  let mut second = rx.recv();
-  assert!(poll_with(&mut first, &first_waker).is_pending());
-  assert!(poll_with(&mut second, &second_waker).is_pending());
-  // Lane A is full, and its one commit notified the first receiver.
-  tx.try_send(Three::A, 1).unwrap();
+  let (r_probe, r_waker) = Probe::new();
+  let (t_probe, t_waker) = Probe::new();
+  let (u_probe, u_waker) = Probe::new();
+  let (mut t_batch, mut u_batch) = (Vec::new(), Vec::new());
+  let mut r = rx.recv();
+  let mut t = rx.recv_many(&mut t_batch, Quota::up_to(1).lanes(Three::A..=Three::A));
+  let mut u = rx.recv_many(&mut u_batch, only_b());
+  assert!(poll_with(&mut r, &r_waker).is_pending());
+  assert!(poll_with(&mut t, &t_waker).is_pending());
+  assert!(poll_with(&mut u, &u_waker).is_pending());
+  // B's commit notifies R, the oldest in B's line; A's notifies T, R holding a notice already.
+  tx.try_send(Three::B, 1).unwrap();
+  tx.try_send(Three::A, 2).unwrap();
+  assert!(r_probe.take() && t_probe.take(), "one notice each");
+  assert!(!u_probe.take());
+  // Lane A is full: the reserve waits for its room.
   let gate = StdArc::new(Gate {
     woken: AtomicBool::new(false),
     open: AtomicBool::new(false),
   });
   let gated = core::task::Waker::from(gate.clone());
   let mut reserve = tx.reserve(Three::A);
-  assert!(
-    poll_with(&mut reserve, &gated).is_pending(),
-    "waits for A's room"
-  );
-  // B's one commit notifies the first receiver too: the oldest in B's line.
-  tx.try_send(Three::B, 2).unwrap();
-  assert!(first_probe.take());
-  assert!(!second_probe.take());
+  assert!(poll_with(&mut reserve, &gated).is_pending());
 
   let woken = std::thread::scope(|scope| {
-    // The first receive takes A's item, by priority, and grants A's room to the reserve, whose
-    // waker then waits for the gate.
-    let taker = scope.spawn(|| poll_with(&mut first, &first_waker));
+    let taker = scope.spawn(|| poll_with(&mut r, &r_waker));
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut woken = false;
     while !woken && Instant::now() < deadline {
-      woken = second_probe.take();
+      woken = u_probe.take();
       std::thread::sleep(Duration::from_millis(1));
     }
     let shut = !gate.open.load(Ordering::SeqCst);
@@ -656,15 +659,90 @@ fn a_granted_waker_that_blocks_holds_back_no_chain() {
   });
   assert!(
     woken,
-    "the chain woke the second receiver while the granted waker was blocked"
+    "the chain woke U while the granted waker was blocked"
   );
   assert!(gate.woken.load(Ordering::SeqCst), "the reserve was granted");
-  assert!(matches!(
-    poll_with(&mut second, &second_waker),
-    Poll::Ready(Ok(_))
-  ));
+  assert!(matches!(poll_with(&mut u, &u_waker), Poll::Ready(Ok(_))));
   assert!(matches!(
     poll_with(&mut reserve, &gated),
     Poll::Ready(Ok(_))
   ));
+  drop(t);
+}
+
+/// A receive of lane B alone: a batch of one, limited to B.
+fn only_b() -> Quota<Three> {
+  Quota::up_to(1).lanes(Three::B..=Three::B)
+}
+
+/// A notice belongs to a receive, not to a lane's place: a receive of lanes A and B notified by
+/// a commit to A is passed over by the commit to B, which wakes the receive of B alone.
+#[test]
+fn a_notified_receive_is_passed_over_on_its_other_lanes() {
+  let (tx, rx) = channel_with::<u32, Three, _>(three(1, false), Strict).unwrap();
+  let (first_probe, first_waker) = Probe::new();
+  let (second_probe, second_waker) = Probe::new();
+  let mut first = rx.recv();
+  let mut batch = Vec::new();
+  let mut second = rx.recv_many(&mut batch, only_b());
+  assert!(poll_with(&mut first, &first_waker).is_pending());
+  assert!(poll_with(&mut second, &second_waker).is_pending());
+  tx.try_send(Three::A, 1).unwrap();
+  assert!(first_probe.take());
+  // The first receive's task is busy elsewhere, and does not poll it yet.
+  tx.try_send(Three::B, 2).unwrap();
+  assert!(!first_probe.take(), "no receive holds two notices");
+  assert!(
+    second_probe.take(),
+    "the commit to B wakes the receive of B alone"
+  );
+}
+
+/// Where a lane's only receive already holds another lane's notice, it takes this lane's, and the
+/// notice it held passes on in its own lane: a receive of A and B notified by a commit to B, then
+/// the only one for A's commit, leaves B's notice to the receive of B alone.
+#[test]
+fn a_notice_moves_to_the_lane_only_its_receive_can_serve() {
+  let (tx, rx) = channel_with::<u32, Three, _>(three(1, false), Strict).unwrap();
+  let (first_probe, first_waker) = Probe::new();
+  let (second_probe, second_waker) = Probe::new();
+  let mut first = rx.recv();
+  let mut batch = Vec::new();
+  let mut second = rx.recv_many(&mut batch, only_b());
+  assert!(poll_with(&mut first, &first_waker).is_pending());
+  assert!(poll_with(&mut second, &second_waker).is_pending());
+  tx.try_send(Three::B, 1).unwrap();
+  assert!(first_probe.take(), "the oldest receive of B");
+  assert!(!second_probe.take());
+  tx.try_send(Three::A, 2).unwrap();
+  assert!(
+    second_probe.take(),
+    "B's notice passed to the receive of B alone"
+  );
+  assert!(!first_probe.take(), "the first receive was woken already");
+}
+
+/// A notice moves along the lines as far as it must: receives of {A, B}, {B, C} and {C}, notified
+/// by commits to B and to C, then a commit to A, which only the first can serve. A's notice moves
+/// the first receive's B notice to the second, and the second's C notice to the third.
+#[test]
+fn a_notice_moves_along_the_lines_to_a_receive_holding_none() {
+  let (tx, rx) = channel_with::<u32, Three, _>(three(1, false), Strict).unwrap();
+  let probes: Vec<_> = (0..3).map(|_| Probe::new()).collect();
+  let (mut ab, mut bc, mut c) = (Vec::new(), Vec::new(), Vec::new());
+  let mut first = rx.recv_many(&mut ab, Quota::up_to(1).lanes(Three::A..=Three::B));
+  let mut second = rx.recv_many(&mut bc, Quota::up_to(1).lanes(Three::B..=Three::C));
+  let mut third = rx.recv_many(&mut c, Quota::up_to(1).lanes(Three::C..=Three::C));
+  assert!(poll_with(&mut first, &probes[0].1).is_pending());
+  assert!(poll_with(&mut second, &probes[1].1).is_pending());
+  assert!(poll_with(&mut third, &probes[2].1).is_pending());
+  tx.try_send(Three::B, 1).unwrap();
+  tx.try_send(Three::C, 2).unwrap();
+  assert!(probes[0].0.take() && probes[1].0.take() && !probes[2].0.take());
+  tx.try_send(Three::A, 3).unwrap();
+  assert!(probes[2].0.take(), "three items, three receives notified");
+  assert!(
+    !probes[0].0.take() && !probes[1].0.take(),
+    "none woken twice"
+  );
 }

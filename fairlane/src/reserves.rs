@@ -125,7 +125,7 @@ impl Reserves {
           return done(wait, Ok(()));
         }
         Ok(()) => {
-          *wait = Wait::Waiting(line.insert(fresh));
+          *wait = Wait::Waiting(line.insert(fresh, ()));
           self.parked.fetch_add(1, Ordering::SeqCst);
           return Poll::Pending;
         }

@@ -9,6 +9,7 @@ use core::{
 use hybrid_array::Array;
 
 use crate::{
+  arrivals::Receive,
   channel::Shared,
   choice::{Choice, choose, fits},
   error::Ended,
@@ -417,7 +418,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     let mut wakers: PerLane<Option<Waker>, L> = PerLane::from_array(Array::from_fn(|_| None));
     for (index, waker) in wakers.as_mut_slice().iter_mut().enumerate() {
       if holds.as_slice()[index] {
-        *waker = self.lane_at(index).arrivals.wake_one();
+        *waker = self.notify(index);
       }
     }
     let mut wakes = Wakes::new();
@@ -713,6 +714,8 @@ impl<T, L: Lane, Y: Policy<L>> fmt::Debug for Receiver<T, L, Y> {
 pub(crate) struct Arrival<L: Lane> {
   /// Its place in each lane it sleeps on.
   keys: PerLane<Option<Key>, L>,
+  /// Its notification identity while it is in the lines, shared by its places.
+  receive: Option<Arc<Receive>>,
   /// Whether it may hold a place: it began to join the lines.
   asleep: bool,
   /// Whether it is in the line of every lane its quota admits.
@@ -723,6 +726,7 @@ impl<L: Lane> Arrival<L> {
   fn new() -> Self {
     Self {
       keys: PerLane::from_array(Array::from_fn(|_| None)),
+      receive: None,
       asleep: false,
       registered: false,
     }
@@ -730,11 +734,21 @@ impl<L: Lane> Arrival<L> {
 
   /// Joins the line of every lane `quota` admits that it is not in yet.
   fn sleep<T, Y: Policy<L>>(&mut self, shared: &Shared<T, L, Y>, quota: &Quota<L>, waker: &Waker) {
+    // A fresh identity each time it joins the lines, made before its first place.
+    let receive = self
+      .receive
+      .get_or_insert_with(|| Arc::new(Receive::new()))
+      .clone();
     self.asleep = true;
     for (index, key) in self.keys.as_mut_slice().iter_mut().enumerate() {
       if quota.admits_at(index) && key.is_none() {
         let fresh = waker.clone();
-        *key = Some(shared.lane_at(index).arrivals.listen(fresh));
+        *key = Some(
+          shared
+            .lane_at(index)
+            .arrivals
+            .listen(fresh, receive.clone()),
+        );
       }
     }
     self.registered = true;
@@ -764,17 +778,20 @@ impl<L: Lane> Arrival<L> {
     }
     self.asleep = false;
     self.registered = false;
-    let mut wakers: PerLane<(Option<Waker>, Option<Waker>), L> =
-      PerLane::from_array(Array::from_fn(|_| (None, None)));
+    // First the identity, so that no line gives the receive a notice while it leaves.
+    let held = self.receive.take().and_then(|receive| receive.leave());
+    let mut stored: PerLane<Option<Waker>, L> = PerLane::from_array(Array::from_fn(|_| None));
     for (index, key) in self.keys.as_mut_slice().iter_mut().enumerate() {
       if let Some(key) = key.take() {
-        wakers.as_mut_slice()[index] = shared.lane_at(index).arrivals.leave(key, spend);
+        stored.as_mut_slice()[index] = shared.lane_at(index).arrivals.leave(key);
       }
     }
-    for (stored, passed) in wakers.as_mut_slice() {
-      wakes.discard(stored.take());
-      wakes.wake(passed.take());
+    // A notice not spent is given again in its lane, once every line is left.
+    let passed = held.filter(|_| !spend).and_then(|lane| shared.notify(lane));
+    for waker in stored.as_mut_slice() {
+      wakes.discard(waker.take());
     }
+    wakes.wake(passed);
   }
 
   /// Polls one receive to its end.

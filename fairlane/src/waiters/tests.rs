@@ -80,7 +80,7 @@ impl Tasks {
 /// Puts `waker` in line as the queues' owners do: room first, then the waiter.
 fn insert(waiters: &mut Waiters, waker: Waker) -> Key {
   waiters.make_room();
-  waiters.insert(waker)
+  waiters.insert(waker, ())
 }
 
 #[test]
