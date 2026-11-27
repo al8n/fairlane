@@ -408,9 +408,8 @@ fn ma8_a_chain_sees_an_item_moving_into_the_lookahead() {
       woken.0.load(Ordering::SeqCst),
       "the chain woke the receiver waiting on lane B"
     );
-    let mut wakes = crate::wake::Wakes::new();
-    tx.shared().lane_at(1).arrivals.leave(key, true, &mut wakes);
-    wakes.finish();
+    let (stored, passed) = tx.shared().lane_at(1).arrivals.leave(key, true);
+    drop((stored, passed));
     drop((tx, rx));
   });
 }

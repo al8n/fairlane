@@ -20,7 +20,7 @@ use crate::{
   snapshot::Snapshot,
   sync::{Arc, Mutex, Ordering, lock},
   waiters::Key,
-  wake::{Wakes, wake},
+  wake::{Wakes, wake_all},
 };
 
 /// The receiving half of a channel. Clones share the channel: each item goes to one receive.
@@ -174,6 +174,7 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
     let state = self.lane_at(0);
     let lane_limit = quota.limit_at(0);
     let mut held = 0;
+    let mut granted = Vec::new();
     while fits(held, quota.limit(), lane_limit) {
       if !sink.room(held == 0) {
         break;
@@ -181,17 +182,18 @@ impl<T, L: Lane, Y: Policy<L>> Shared<T, L, Y> {
       let Some(popped) = state.ring.pop() else {
         break;
       };
-      // The room goes back first, and the item to the sink; only then does the waker of a
-      // reserve the room was granted to run, so a waker that panics costs no item.
-      let granted = state.release();
+      // The room goes back first, and the item to the sink. The wakers of the reserves the
+      // batch's rooms are granted to run once the whole batch is taken, so a waker that panics, or
+      // blocks, costs no item and holds back no room.
+      granted.extend(state.release());
       sink.put(Received {
         item: popped.item,
         lane: self.name(0),
         ordinal: popped.ordinal,
       });
       held += 1;
-      wake(granted);
     }
+    wake_all(granted);
     match NonZeroUsize::new(held) {
       Some(held) => Took::Items(held),
       None if state.ring.is_ended() => Took::Ended,
@@ -410,8 +412,10 @@ impl<T, L: Lane, Y: Policy<L>> Drop for Repair<'_, T, L, Y> {
 
 /// The room of the items one receive took, given back when it is dropped: after the choice lock.
 ///
-/// Every unit is given back. A reserve a unit is granted to is woken under its own catch, so a
-/// waker that panics skips no other unit; its panic is raised again once all are back.
+/// Every unit is given back before any waker runs: a reserve's waker may block, or send into a
+/// lane whose unit this batch still owes, and it runs only once the batch owes none. The wakers of
+/// the reserves the units are granted to are then woken, each under its own catch. They are kept
+/// in a `Vec`, which allocates only where a reserve waits.
 struct RoomBack<'a, T, L: Lane, Y: Policy<L>> {
   shared: &'a Shared<T, L, Y>,
   units: PerLane<usize, L>,
@@ -419,13 +423,13 @@ struct RoomBack<'a, T, L: Lane, Y: Policy<L>> {
 
 impl<T, L: Lane, Y: Policy<L>> Drop for RoomBack<'_, T, L, Y> {
   fn drop(&mut self) {
-    let mut wakes = Wakes::new();
+    let mut granted = Vec::new();
     for (index, units) in self.units.as_slice().iter().enumerate() {
       for _ in 0..*units {
-        wakes.wake(self.shared.lane_at(index).release());
+        granted.extend(self.shared.lane_at(index).release());
       }
     }
-    wakes.finish();
+    wake_all(granted);
   }
 }
 
@@ -686,15 +690,24 @@ impl<L: Lane> Arrival<L> {
   }
 
   /// Leaves every line: spending the notifications it holds (`spend`), or passing them on.
+  ///
+  /// Every line is left before any waker it lets go runs: a waker that blocks then holds up no
+  /// lane of this receive's, and a notification can no longer come to a place it is leaving.
   fn leave<T, Y: Policy<L>>(&mut self, shared: &Shared<T, L, Y>, spend: bool, wakes: &mut Wakes) {
     if !self.asleep {
       return;
     }
     self.asleep = false;
+    let mut wakers: PerLane<(Option<Waker>, Option<Waker>), L> =
+      PerLane::from_array(Array::from_fn(|_| (None, None)));
     for (index, key) in self.keys.as_mut_slice().iter_mut().enumerate() {
       if let Some(key) = key.take() {
-        shared.lane_at(index).arrivals.leave(key, spend, wakes);
+        wakers.as_mut_slice()[index] = shared.lane_at(index).arrivals.leave(key, spend);
       }
+    }
+    for (stored, passed) in wakers.as_mut_slice() {
+      wakes.discard(stored.take());
+      wakes.wake(passed.take());
     }
   }
 

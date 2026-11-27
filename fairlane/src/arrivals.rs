@@ -87,21 +87,21 @@ impl Arrivals {
 
   /// Leaves the line. Where the receiver had been notified and is being dropped (`spend` false),
   /// the notification goes to the next receiver in line; where it woke and goes on to take
-  /// (`spend` true), it is spent. The wakers it lets go run through `wakes`, after the lock.
-  pub(crate) fn leave(&self, key: Key, spend: bool, wakes: &mut Wakes) {
-    let (stored, passed) = {
-      let mut line = lock(&self.line);
-      let (state, stored) = line.remove(key);
-      self.count.fetch_sub(1, Ordering::SeqCst);
-      let passed = if state == State::Notified && !spend && line.notified() == 0 {
-        line.notify_oldest().flatten()
-      } else {
-        None
-      };
-      (stored, passed)
+  /// (`spend` true), it is spent.
+  ///
+  /// Answers the waker the receiver held, to be dropped, and the waker of the receiver its
+  /// notification went to, to be woken: by the caller, once the receive has left every line.
+  #[must_use = "the wakers are to be dropped and woken"]
+  pub(crate) fn leave(&self, key: Key, spend: bool) -> (Option<Waker>, Option<Waker>) {
+    let mut line = lock(&self.line);
+    let (state, stored) = line.remove(key);
+    self.count.fetch_sub(1, Ordering::SeqCst);
+    let passed = if state == State::Notified && !spend && line.notified() == 0 {
+      line.notify_oldest().flatten()
+    } else {
+      None
     };
-    wakes.discard(stored);
-    wakes.wake(passed);
+    (stored, passed)
   }
 
   /// Notifies one waiting receiver, where any waits and none is notified and not yet awake. Answers

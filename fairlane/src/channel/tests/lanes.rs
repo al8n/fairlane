@@ -442,3 +442,42 @@ fn the_most_lanes_fit_a_small_stack() {
     .join()
     .unwrap();
 }
+
+/// A batch gives back the room of every item it took before it wakes a reserve granted one of
+/// them: a waker that sends, inline, into another lane the batch emptied finds its room.
+#[test]
+fn a_batch_gives_back_every_room_before_it_wakes() {
+  type Tx = Sender<u32, Three, Strict>;
+
+  /// Sends into lane B, inline, when woken.
+  struct SendsOnWake(std::sync::Mutex<Option<Tx>>);
+
+  impl std::task::Wake for SendsOnWake {
+    fn wake(self: StdArc<Self>) {
+      if let Some(tx) = self.0.lock().unwrap().take() {
+        tx.send_blocking(Three::B, 9).unwrap();
+      }
+    }
+  }
+
+  let (tx, rx) = channel_with::<u32, Three, _>(three(1, false), Strict).unwrap();
+  tx.try_send(Three::A, 1).unwrap();
+  tx.try_send(Three::B, 2).unwrap();
+  let sends = StdArc::new(SendsOnWake(std::sync::Mutex::new(Some(tx.clone()))));
+  let waker = std::task::Waker::from(sends.clone());
+  let mut waiting = tx.reserve(Three::A);
+  assert!(poll_with(&mut waiting, &waker).is_pending());
+
+  let mut batch = Vec::new();
+  assert_eq!(rx.try_recv_many(&mut batch, 2), Ok(2));
+  assert!(sends.0.lock().unwrap().is_none(), "the waker ran");
+  assert_eq!(
+    tx.snapshot().queued(Three::B),
+    1,
+    "the waker's send found B's room"
+  );
+  assert!(matches!(
+    poll_with(&mut waiting, &waker),
+    Poll::Ready(Ok(_))
+  ));
+}
