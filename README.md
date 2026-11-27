@@ -148,6 +148,11 @@ the unwind: the item of a single receive (`recv`, `try_recv`, `recv_blocking`), 
 which it was given by value. A batched receive keeps every item it took in its `Vec`. The panic is
 not swallowed: that would hide a bug in the executor or the policy.
 
+**An allocation failure, capacity overflow included, panics before the call changes any state.** A
+receive that was waiting gives up its place in line first, as a dropped one does, so that what it
+was notified of passes on. A batch that finds no room for a later item stops instead, and keeps what
+it holds.
+
 ## Features
 
 | Feature | Default | What it adds |
